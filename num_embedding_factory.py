@@ -18,61 +18,39 @@ from rtdl_num_embeddings import (
 
 def get_num_embedding(
     embedding_type: str,
-    X_train,
-    d_embedding: int,
+    X_train=None,
+    d_embedding: int = None,
     y_train=None,
     n_bins: int = 5,
     d_periodic_embedding: int = None,
     sigma: float = 0.01,
+    n_features: int = None,
     **kwargs
 ):
     """
     Retourne un module d'embedding numérique basé sur rtdl_num_embeddings.
-    
-    Args:
-        embedding_type: Type d'embedding (voir liste ci-dessous)
-        X_train: Données d'entraînement (batch_size, n_features) 
-        d_embedding: Dimension de sortie de l'embedding
-        y_train: Labels pour tree-based embeddings (optionnel)
-        n_bins: Nombre de bins pour PLE (défaut: 5)
-        d_periodic_embedding: Dimension pour periodic embeddings (défaut: d_embedding)
-        sigma: Paramètre pour periodic embeddings (défaut: 0.01)
-    
-    Returns:
-        Module PyTorch qui transforme (B, F) → (B, F, d_embedding)
-    
-    Types d'embeddings disponibles:
-        L         : LinearEmbeddings
-        LR        : LinearReLUEmbeddings  
-        LR-LR     : LinearReLUEmbeddings → projection
-        Q         : PiecewiseLinearEmbeddings (quantile bins)
-        Q-L       : PiecewiseLinearEncoding (quantile) → Linear
-        Q-LR      : PiecewiseLinearEncoding (quantile) → Linear → ReLU
-        Q-LR-LR   : PiecewiseLinearEncoding (quantile) → Linear → ReLU → Linear → ReLU
-        T         : PiecewiseLinearEmbeddings (tree bins)
-        T-L       : PiecewiseLinearEncoding (tree) → Linear  
-        T-LR      : PiecewiseLinearEncoding (tree) → Linear → ReLU
-        T-LR-LR   : PiecewiseLinearEncoding (tree) → Linear → ReLU → Linear → ReLU
-        P         : PeriodicEmbeddings
-        P-L       : PeriodicEmbeddings → projection
-        P-LR      : PeriodicEmbeddings → projection → ReLU
-        P-LR-LR   : PeriodicEmbeddings → projection → ReLU → projection → ReLU
+    X_train est désormais optionnel ; si absent, `n_features` doit être fourni.
+    Les embeddings basés sur quantiles/tree nécessitent néanmoins X_train.
     """
-    
-    # Conversion des données
-    if isinstance(X_train, np.ndarray):
-        X_train = torch.tensor(X_train, dtype=torch.float32)
-    elif isinstance(X_train, torch.Tensor):
-        X_train = X_train.float()
-    
+    # Conversion des données si fournies
+    if X_train is not None:
+        if isinstance(X_train, np.ndarray):
+            X_train = torch.tensor(X_train, dtype=torch.float32)
+        elif isinstance(X_train, torch.Tensor):
+            X_train = X_train.float()
+
     if y_train is not None:
         if isinstance(y_train, np.ndarray):
             y_train = torch.tensor(y_train)
         elif isinstance(y_train, torch.Tensor):
             y_train = y_train
-    
-    n_features = X_train.shape[1]
-    
+
+    # Déduire n_features si possible
+    if X_train is not None and n_features is None:
+        n_features = X_train.shape[1]
+    if n_features is None:
+        raise ValueError("n_features ou X_train doit être fourni pour construire les embeddings.")
+
     # === SIMPLE EMBEDDINGS ===
     if embedding_type == "L":
         return LinearEmbeddings(n_features, d_embedding)
@@ -259,22 +237,32 @@ class NumericalEmbedder(nn.Module):
     """
     
     def __init__(
-        self, 
-        embedding_type: str, 
-        X_train, 
-        d_embedding: int, 
+        self,
+        embedding_type: str,
+        X_train=None,
+        d_embedding: int = None,
+        n_features: int = None,
         **kwargs
     ):
         super().__init__()
         self.embedding_type = embedding_type
-        self.n_features = X_train.shape[1] if hasattr(X_train, 'shape') else X_train.shape[1]
+
+        # Déduire n_features si possible
+        if X_train is not None and hasattr(X_train, "shape"):
+            self.n_features = X_train.shape[1]
+        elif n_features is not None:
+            self.n_features = n_features
+        else:
+            raise ValueError("X_train ou n_features doit être fourni pour NumericalEmbedder.")
+
         self.d_embedding = d_embedding
-        
-        # Créer l'embedding
+
+        # Créer l'embedding (transmettre n_features pour compatibilité)
         self.embedder = get_num_embedding(
             embedding_type=embedding_type,
             X_train=X_train,
             d_embedding=d_embedding,
+            n_features=self.n_features,
             **kwargs
         )
     

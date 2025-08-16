@@ -14,7 +14,7 @@ parent_dir = os.path.dirname(current_dir)
 sys.path.append(parent_dir)
 
 from data_utils import prepare_california_data, get_data_splits
-from rtdl_revisiting_models.bin.ft_transformer_plr import TransformerPLR
+import rtdl_lib as rtdl
 from num_embedding_factory import get_num_embedding
 
 # =========================
@@ -32,7 +32,7 @@ y_test_tensor = data['y_test']
 n_features = data['n_features']
 
 # =========================
-# Configuration du modèle FT-Transformer avec P-LR
+# Configuration du modèle FT-Transformer (choix du tokenizer numérique pour variables continues)
 # =========================
 model_config = {
     "d_numerical": n_features,
@@ -57,15 +57,30 @@ print("=== Paramètres de configuration ===")
 for k, v in model_config.items():
     print(f"{k}: {v}")
 
-model = TransformerPLR(**model_config)
+# Construire le modèle via rtdl_lib (FTTransformer) en respectant les paramètres principaux
+ffn_d_hidden = int(model_config["d_token"] * model_config["d_ffn_factor"])
+model = rtdl.FTTransformer.make_baseline(
+    n_num_features=n_features,
+    cat_cardinalities=None,
+    d_token=model_config["d_token"],
+    n_blocks=model_config["n_layers"],
+    attention_dropout=model_config["attention_dropout"],
+    ffn_d_hidden=ffn_d_hidden,
+    ffn_dropout=model_config["ffn_dropout"],
+    residual_dropout=model_config["residual_dropout"],
+    d_out=model_config["d_out"],
+)
 
-# Ajouter l'embedding P-LR
+# Ajouter l'embedding numérique (choix de tokenizer/embedding pour variables continues)
+# Exemples d'options: "LR", "PLR", etc..
 num_embedding = get_num_embedding(
-    embedding_type="P-LR",
+    embedding_type="LR",
     X_train=X_train_tensor.numpy(),  # Convertir en numpy pour get_num_embedding
     d_embedding=model_config["d_token"]
 )
-model.tokenizer.num_tokenizer = num_embedding
+# Adapter l'embedding au tokenizer numérique du FT-Transformer
+# (rtdl_lib stocke le tokenizer dans `feature_tokenizer`)
+model.feature_tokenizer.num_tokenizer = num_embedding
 
 # =========================
 # Boucle d'entraînement avec validation
@@ -93,7 +108,13 @@ for epoch in range(n_epochs):
         batch_y = y_train_tensor[indices]
         optimizer.zero_grad()
         output = model(batch_x, None)
-        loss = loss_fn(output, batch_y)
+        # Squeeze targets when d_out == 1 so shapes match model output (batch,)
+        batch_y_squeezed = (
+            batch_y.squeeze(-1)
+            if batch_y.dim() > 1 and batch_y.shape[-1] == 1
+            else batch_y
+        )
+        loss = loss_fn(output.squeeze(-1), batch_y_squeezed)
         loss.backward()
         optimizer.step()
         epoch_loss += loss.item() * batch_x.size(0)
@@ -109,7 +130,12 @@ for epoch in range(n_epochs):
             preds = model(batch_x, None)
             val_preds.append(preds)
     val_preds = torch.cat(val_preds)
-    val_loss = loss_fn(val_preds, y_val_tensor)
+    val_targets = (
+        y_val_tensor.squeeze(-1)
+        if y_val_tensor.dim() > 1 and y_val_tensor.shape[-1] == 1
+        else y_val_tensor
+    )
+    val_loss = loss_fn(val_preds.squeeze(-1), val_targets)
     print(f"Epoch {epoch+1}/{n_epochs} | Train Loss: {epoch_loss:.4f} | Val Loss: {val_loss:.4f}")
 
     if val_loss < best_val_loss:
@@ -131,7 +157,12 @@ if best_model_state is not None:
 model.eval()
 with torch.no_grad():
     preds = model(X_test_tensor, None)
-    test_loss = loss_fn(preds, y_test_tensor)
+    test_targets = (
+        y_test_tensor.squeeze(-1)
+        if y_test_tensor.dim() > 1 and y_test_tensor.shape[-1] == 1
+        else y_test_tensor
+    )
+    test_loss = loss_fn(preds.squeeze(-1), test_targets)
     print(f"Test Loss: {test_loss.item():.4f}")
 
 # =========================
@@ -143,19 +174,23 @@ class AttentionHook:
         self.attention_maps = []
     
     def __call__(self, module, input, output):
-        # output est un tuple (sortie, attention_weights)
-        self.attention_maps.append(output[1].detach().cpu())
+        try:
+            att = output[1]['attention_probs']
+            self.attention_maps.append(att.detach().cpu())
+        except Exception:
+            return
 
 hook = AttentionHook()
 handles = []
-for layer in model.layers:
+# Attacher les hooks sur les blocs du transformer (rtdl_lib expose transformer.blocks)
+for layer in model.transformer.blocks:
     handles.append(layer['attention'].register_forward_hook(hook))
 
 model.eval()
 with torch.no_grad():
-    # Passer tout le dataset d'entraînement par batch pour collecter les cartes d'attention
-    for i in range(0, X_train_tensor.size(0), batch_size):
-        batch_x = X_train_tensor[i:i+batch_size]
+    # Passer tout le dataset de test par batch pour collecter les cartes d'attention
+    for i in range(0, X_test_tensor.size(0), batch_size):
+        batch_x = X_test_tensor[i:i+batch_size]
         model(batch_x, None)
 
 if hook.attention_maps:
@@ -165,15 +200,30 @@ if hook.attention_maps:
     # Calcul de la moyenne globale (toutes les observations, têtes et blocs)
     average_attention_map = attention_maps.mean(0)
     
-    # Token CLS en première position
-    average_cls_attention_map = average_attention_map[0]
+    # FTTransformer ajoute le token CLS à la fin => extraire la ligne -1
+    average_cls_attention_map = average_attention_map[-1]
     
-    # Importance des features (tokens 1 à n_features+1)
-    feature_importance = average_cls_attention_map[1:1+n_features]
+    # Importance des features : tous les tokens sauf le CLS final
+    feature_importance = average_cls_attention_map[:-1].cpu().numpy()
     
     print("\nImportance des caractéristiques (via attention du token CLS):")
     for i, imp in enumerate(feature_importance):
-        print(f"Feature {i}: {imp.item():.4f}")
+        print(f"Feature {i}: {imp:.4f}")
+
+    # Sauvegarde des résultats (npy + csv)
+    import csv
+    os.makedirs('results', exist_ok=True)
+    np.save(os.path.join('results', 'feature_importance.npy'), feature_importance)
+    # calculer et sauvegarder les rangs
+    import scipy.stats
+    feature_ranks = scipy.stats.rankdata(-feature_importance)
+    np.save(os.path.join('results', 'feature_ranks.npy'), feature_ranks)
+    csv_path = os.path.join('results', 'feature_importance_and_ranks.csv')
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['feature_index', 'importance', 'rank'])
+        for idx, imp, rank in zip(range(len(feature_importance)), feature_importance, feature_ranks):
+            writer.writerow([int(idx), float(imp), int(rank)])
 else:
     print("Aucune carte d'attention collectée.")
 

@@ -1,329 +1,163 @@
-"""
-FTT+ Interprétable - Modèle optimisé inspiré de RTDL avec Sparsemax
+"""Interpretable FT-Transformer (sparse + shared-V)
 
-Cette implémentation combine:
-1. L'architecture robuste de RTDL
-2. L'attention sélective sparse avec sparsemax
-3. L'interprétabilité multi-têtes inspirée du TFT
-4. L'utilisation de sparsemax pour une attention plus creuse et interprétable
+Ce module implémente une variante interprétable du FT-Transformer adaptée aux données
+tabulaires. Principes clés (résumé) :
+- Chaque variable (catégorielle ou numérique) est tokenisée via FeatureTokenizer en un embedding
+  de dimension d_token. Les embeddings sont assemblés en séquence et préfixés par un token [CLS]
+  qui agrège l'information pour la prédiction finale.
+- L'attention multi-tête utilisée remplace softmax par sparsemax, produisant des distributions
+  creuses et concentrant l'attention sur un petit sous-ensemble de features.
+- Les têtes partagent la même projection V (W_V commune) afin d'éliminer la distorsion due à
+  différentes transformations V_h ; ainsi, la seule source de variabilité entre têtes est la
+  matrice d'attention elle-même.
+- Les cartes d'attention sont moyennées sur les têtes pour obtenir une matrice unique
+  avg_attention (seq_len × seq_len). La ligne correspondant au token [CLS] fournit des scores
+  d'importance intrinsèques pour les features (normalisés par ligne, somme = 1). Grâce à
+  sparsemax ces scores sont souvent creux et directement exploitables.
 
-Références:
-    * [gorishniy2021revisiting] Yury Gorishniy, Ivan Rubachev, Valentin Khrulkov, Artem Babenko, "Revisiting Deep Learning Models for Tabular Data", 2021
-    * [gorishniy2021embeddings] Yury Gorishniy, Ivan Rubachev, Artem Babenko, "On Embeddings for Numerical Features in Tabular Deep Learning"
-    * [martins2016sparsemax] André F. T. Martins, Ramón F. Astudillo, "From Softmax to Sparsemax: A Sparse Model of Attention and Multi-Label Classification"
-    * [lim2021temporal] Bryan Lim, Sercan Ö. Arik, Nicolas Loeff, Tomas Pfister, "Temporal Fusion Transformers for Interpretable Multi-horizon Time Series Forecasting"
+Fonctionnalités exposées :
+- InterpretableTransformerBlock : bloc Transformer utilisant l'attention interprétable.
+- InterpretableFTTPlus : modèle complet (tokenizer + blocs + head) et utilitaire
+  get_cls_importance() qui collecte, moyenne et sauvegarde les importances par feature.
+
 """
 
 import torch
 import torch.nn as nn
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 from torch import Tensor
-
+import numpy as np
+import scipy.stats
+import os
+import csv
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 from .attention import InterpretableMultiHeadAttention
 from rtdl_lib.modules import FeatureTokenizer, CLSToken, _make_nn_module
 
-ModuleType = Union[str, Callable[..., nn.Module]]
-
 class AttentionHook:
-    def __init__(self):
-        self.attention_maps = []
-    
+    """Collecte les cartes d'attention pour l'interprétabilité."""
+    def __init__(self) -> None:
+        self.attention_maps: List[Tensor] = []
+
     def __call__(self, module, input, output):
-        self.attention_maps.append(output[1].detach())
-    
-    def clear(self):
+        att = output[1]['attention_probs']
+        self.attention_maps.append(att.detach().cpu())
+
+    def clear(self) -> None:
         self.attention_maps.clear()
 
-
 class InterpretableTransformerBlock(nn.Module):
-    """Bloc Transformer avec attention interprétable et architecture RTDL.
-    
-    Cette implémentation suit l'architecture des blocs Transformer de RTDL
-    tout en intégrant le mécanisme d'attention interprétable FTT+ avec sparsemax.
-    
-    Args:
-        d_token: la taille des tokens d'entrée et de sortie
-        n_heads: le nombre de têtes d'attention
-        attention_dropout: taux de dropout pour l'attention
-        attention_initialization: politique d'initialisation pour l'attention
-        attention_normalization: type de normalisation pour l'attention
-        ffn_d_hidden: taille cachée du réseau feed-forward
-        ffn_dropout: taux de dropout du FFN
-        ffn_activation: fonction d'activation du FFN
-        ffn_normalization: type de normalisation du FFN
-        residual_dropout: taux de dropout des connexions résiduelles
-        prenormalization: si True, applique la normalisation avant les sous-modules
-        
-    Example:
-        .. testcode::
-        
-            block = InterpretableTransformerBlock(
-                d_token=128,
-                n_heads=8,
-                attention_dropout=0.1,
-                attention_initialization='kaiming',
-                attention_normalization='LayerNorm',
-                ffn_d_hidden=256,
-                ffn_dropout=0.1,
-                ffn_activation='ReGLU',
-                ffn_normalization='LayerNorm',
-                residual_dropout=0.0,
-                prenormalization=True
-            )
-            x = torch.randn(4, 10, 128)
-            output, attention_weights = block(x)
-            assert output.shape == x.shape
-    """
-    
+    """Bloc Transformer avec attention interprétable (sparsemax + V partagé)."""
     def __init__(
         self,
-        *,
         d_token: int,
         n_heads: int,
         attention_dropout: float,
         attention_initialization: str,
-        attention_normalization: ModuleType,
+        attention_normalization: str,
         ffn_d_hidden: int,
         ffn_dropout: float,
-        ffn_activation: ModuleType,
-        ffn_normalization: ModuleType,
+        ffn_activation: str,
+        ffn_normalization: str,
         residual_dropout: float,
         prenormalization: bool,
-        attention_mode: str = 'hybrid',  # Défaut = 'hybrid'
     ) -> None:
         super().__init__()
-        
         self.prenormalization = prenormalization
-        
-        # Mécanisme d'attention interprétable avec sparsemax
         self.attention = InterpretableMultiHeadAttention(
-            d_model=d_token,
-            n_heads=n_heads,
-            dropout=attention_dropout,
-            initialization=attention_initialization,
-            attention_mode=attention_mode  # Passer le paramètre
+            d_model=d_token, n_heads=n_heads, dropout=attention_dropout, initialization=attention_initialization
         )
-        
-        # Normalisation d'attention
         self.attention_normalization = _make_nn_module(attention_normalization, d_token)
-        
-        # Feed-Forward Network (réutilise l'implémentation RTDL)
+        self.ffn_normalization = _make_nn_module(ffn_normalization, d_token)
         from rtdl_lib.modules import Transformer
         self.ffn = Transformer.FFN(
-            d_token=d_token,
-            d_hidden=ffn_d_hidden,
-            bias_first=True,
-            bias_second=True,
-            dropout=ffn_dropout,
-            activation=ffn_activation
+            d_token=d_token, d_hidden=ffn_d_hidden, bias_first=True, bias_second=True,
+            dropout=ffn_dropout, activation=ffn_activation
         )
-        
-        # Normalisation FFN
-        self.ffn_normalization = _make_nn_module(ffn_normalization, d_token)
-        
-        # Dropouts des connexions résiduelles
-        self.attention_residual_dropout = nn.Dropout(residual_dropout)
-        self.ffn_residual_dropout = nn.Dropout(residual_dropout)
-    
-    def _start_residual(self, x: Tensor, stage: str) -> Tensor:
-        """Démarre une connexion résiduelle avec normalisation pré/post selon la configuration."""
-        if self.prenormalization:
-            if stage == 'attention':
-                return self.attention_normalization(x)
-            else:  # stage == 'ffn'
-                return self.ffn_normalization(x)
-        return x
-    
-    def _end_residual(self, x: Tensor, x_residual: Tensor, stage: str) -> Tensor:
-        """Termine une connexion résiduelle avec dropout et normalisation."""
-        if stage == 'attention':
-            x_residual = self.attention_residual_dropout(x_residual)
-        else:  # stage == 'ffn'
-            x_residual = self.ffn_residual_dropout(x_residual)
-        
-        x = x + x_residual
-        
-        if not self.prenormalization:
-            if stage == 'attention':
-                x = self.attention_normalization(x)
-            else:  # stage == 'ffn'
-                x = self.ffn_normalization(x)
-        
-        return x
-    
-    def forward(self, x: Tensor) -> Tuple[Tensor, Tensor]:
-        """Forward pass avec attention interprétable et architecture résiduelle.
-        
-        Args:
-            x: tensor d'entrée de forme (batch_size, seq_len, d_token)
-            
-        Returns:
-            output: tensor transformé de même forme que l'entrée
-            attention_weights: poids d'attention moyennés de forme (batch_size, seq_len, seq_len)
-        """
-        # Bloc d'attention avec connexion résiduelle
-        x_residual = self._start_residual(x, 'attention')
-        x_residual, attention_weights = self.attention(x_residual)
-        x = self._end_residual(x, x_residual, 'attention')
-        
-        # Bloc FFN avec connexion résiduelle  
-        x_residual = self._start_residual(x, 'ffn')
-        x_residual = self.ffn(x_residual)
-        x = self._end_residual(x, x_residual, 'ffn')
-        
-        return x, attention_weights
+        self.attention_residual_dropout = nn.Dropout(residual_dropout) if residual_dropout > 0.0 else None
+        self.ffn_residual_dropout = nn.Dropout(residual_dropout) if residual_dropout > 0.0 else None
 
+    def apply_normalization(self, x: Tensor, stage: str) -> Tensor:
+        if self.prenormalization:
+            return self.attention_normalization(x) if stage == "attention" else self.ffn_normalization(x)
+        return x
+
+    def add_residual(self, x: Tensor, residual: Tensor, stage: str) -> Tensor:
+        if stage == "attention" and self.attention_residual_dropout:
+            residual = self.attention_residual_dropout(residual)
+        elif stage == "ffn" and self.ffn_residual_dropout:
+            residual = self.ffn_residual_dropout(residual)
+        x = x + residual
+        if not self.prenormalization:
+            x = self.attention_normalization(x) if stage == "attention" else self.ffn_normalization(x)
+        return x
+
+    def forward(self, x: Tensor) -> Tensor:
+        x_residual = self.apply_normalization(x, "attention")
+        att_out, _ = self.attention(x_residual)
+        x = self.add_residual(x, att_out, "attention")
+        x_residual = self.apply_normalization(x, "ffn")
+        x = self.add_residual(x, self.ffn(x_residual), "ffn")
+        return x
 
 class InterpretableFTTPlus(nn.Module):
-    """FT-Transformer interprétable avec attention sélective FTT+ et sparsemax.
-    
-    Cette implémentation combine l'architecture robuste du FT-Transformer RTDL
-    avec les innovations d'attention interprétable pour données tabulaires et sparsemax.
-    
-    Caractéristiques principales:
-        * Feature Tokenizer RTDL pour l'embedding optimal
-        * Token CLS pour l'inférence BERT-like  
-        * Blocs Transformer avec attention interprétable et sparsemax
-        * Méthodes d'explicabilité intégrées
-        
-    Args:
-        n_num_features: nombre de features numériques continues
-        cat_cardinalities: cardinalités des features catégorielles
-        d_token: taille des tokens (doit être divisible par n_heads)
-        n_blocks: nombre de blocs Transformer
-        n_heads: nombre de têtes d'attention
-        attention_dropout: taux de dropout de l'attention
-        attention_initialization: initialisation des projections d'attention
-        attention_normalization: type de normalisation de l'attention
-        ffn_d_hidden: taille cachée du feed-forward network
-        ffn_dropout: taux de dropout du FFN
-        ffn_activation: fonction d'activation du FFN  
-        ffn_normalization: type de normalisation du FFN
-        residual_dropout: taux de dropout des connexions résiduelles
-        prenormalization: si True, normalisation avant les sous-modules
-        head_activation: fonction d'activation de la tête finale
-        head_normalization: type de normalisation de la tête finale
-        d_out: dimension de sortie
-        
-    Example:
-        .. testcode::
-        
-            model = InterpretableFTTPlus.make_baseline(
-                n_num_features=3,
-                cat_cardinalities=[2, 5, 10],
-                d_token=128,
-                n_blocks=3,
-                attention_dropout=0.1,
-                ffn_d_hidden=256,
-                ffn_dropout=0.1,
-                residual_dropout=0.0,
-                d_out=1
-            )
-            
-            x_num = torch.randn(32, 3)
-            x_cat = torch.randint(0, 5, (32, 3))
-            
-            logits, attention = model(x_num, x_cat)
-            assert logits.shape == (32, 1)
-            
-            # Analyse d'interprétabilité
-            importance = model.get_cls_importance(x_num[:1], x_cat[:1])
-    """
-    
+    """FT-Transformer interprétable avec attention sparse et V partagé."""
     def __init__(
         self,
-        *,
         n_num_features: int,
-        cat_cardinalities: List[int],
         d_token: int,
         n_blocks: int,
         n_heads: int,
         attention_dropout: float,
         attention_initialization: str,
-        attention_normalization: ModuleType,
+        attention_normalization: str,
         ffn_d_hidden: int,
         ffn_dropout: float,
-        ffn_activation: ModuleType,
-        ffn_normalization: ModuleType,
+        ffn_activation: str,
+        ffn_normalization: str,
         residual_dropout: float,
         prenormalization: bool,
-        head_activation: ModuleType,
-        head_normalization: ModuleType,
+        head_activation: str,
+        head_normalization: str,
         d_out: int,
-        task_type: str = 'classification',  # 'classification' ou 'regression'
-        attention_mode: str = 'hybrid',
+        num_tokenizer: Optional[nn.Module] = None,
     ) -> None:
         super().__init__()
-        
-        # Feature Tokenizer RTDL
-        self.feature_tokenizer = FeatureTokenizer(
-            n_num_features=n_num_features,
-            cat_cardinalities=cat_cardinalities,
-            d_token=d_token
-        )
-        
-        # Token CLS pour l'inférence BERT-like (sera ajouté à la fin)
+        self.feature_tokenizer = FeatureTokenizer(n_num_features=n_num_features, cat_cardinalities=None, d_token=d_token)
+        if num_tokenizer:
+            self.feature_tokenizer.num_tokenizer = num_tokenizer
         self.cls_token = CLSToken(d_token, self.feature_tokenizer.initialization)
-
-        # Blocs Transformer interprétables avec sparsemax
         self.blocks = nn.ModuleList([
             InterpretableTransformerBlock(
-                d_token=d_token,
-                n_heads=n_heads,
-                attention_dropout=attention_dropout,
-                attention_initialization=attention_initialization,
-                attention_normalization=attention_normalization,
-                ffn_d_hidden=ffn_d_hidden,
-                ffn_dropout=ffn_dropout,
-                ffn_activation=ffn_activation,
-                ffn_normalization=ffn_normalization,
-                residual_dropout=residual_dropout,
-                prenormalization=prenormalization,
-                attention_mode=attention_mode
-            )
-            for _ in range(n_blocks)
+                d_token=d_token, n_heads=n_heads, attention_dropout=attention_dropout,
+                attention_initialization=attention_initialization, attention_normalization=attention_normalization,
+                ffn_d_hidden=ffn_d_hidden, ffn_dropout=ffn_dropout, ffn_activation=ffn_activation,
+                ffn_normalization=ffn_normalization, residual_dropout=residual_dropout, prenormalization=prenormalization
+            ) for _ in range(n_blocks)
         ])
-        
-        # Tête de classification
         from rtdl_lib.modules import Transformer
         self.head = Transformer.Head(
-            d_in=d_token,
-            d_out=d_out,
-            bias=True,
-            activation=head_activation,
-            normalization=head_normalization if prenormalization else 'Identity'
+            d_in=d_token, d_out=d_out, bias=True, activation=head_activation,
+            normalization=head_normalization if prenormalization else "Identity"
         )
-        
         self.prenormalization = prenormalization
-    
+
     @classmethod
     def get_baseline_config(cls) -> Dict[str, Any]:
-        """Configuration baseline optimisée pour FTT+ interprétable.
-        
-        Cette configuration suit les meilleures pratiques RTDL tout en
-        optimisant pour l'interprétabilité des données tabulaires.
-        
-        Returns:
-            dict: configuration des hyperparamètres baseline
-        """
         return {
-            'n_heads': 8,
-            'attention_initialization': 'kaiming',
-            'attention_normalization': 'LayerNorm',
-            'ffn_activation': 'ReGLU',
-            'ffn_normalization': 'LayerNorm',
-            'prenormalization': True,
-            'head_activation': 'ReLU',
-            'head_normalization': 'LayerNorm',
-            'attention_mode': 'hybrid',
+            "n_heads": 8,
+            "attention_initialization": "kaiming",
+            "attention_normalization": "LayerNorm",
+            "ffn_activation": "ReGLU",
+            "ffn_normalization": "LayerNorm",
+            "prenormalization": True,
+            "head_activation": "ReLU",
+            "head_normalization": "LayerNorm",
         }
-    
+
     @classmethod
     def make_baseline(
         cls,
-        *,
         n_num_features: int,
-        cat_cardinalities: List[int],
         d_token: int,
         n_blocks: int,
         n_heads: int,
@@ -332,184 +166,124 @@ class InterpretableFTTPlus(nn.Module):
         ffn_dropout: float,
         residual_dropout: float,
         d_out: int,
-        task_type: str = 'classification',  # 'classification' ou 'regression'
-        attention_mode: str = 'hybrid',
-    ) -> 'InterpretableFTTPlus':
-        """Crée un modèle FTT+ interprétable avec configuration baseline.
-        
-        Cette méthode est le constructeur recommandé qui combine les
-        meilleures pratiques RTDL avec les optimisations FTT+.
-        
-        Args:
-            n_num_features: nombre de features numériques continues
-            cat_cardinalities: liste des cardinalités des features catégorielles
-            d_token: taille des tokens (doit être divisible par 8)
-            n_blocks: nombre de blocs Transformer
-            attention_dropout: taux de dropout de l'attention (>0 recommandé)
-            ffn_d_hidden: taille cachée du FFN (recommandé: 2-4x d_token)
-            ffn_dropout: taux de dropout du FFN
-            residual_dropout: taux de dropout des connexions résiduelles
-            d_out: dimension de sortie (1 pour classification binaire)
-            
-        Returns:
-            InterpretableFTTPlus: modèle configuré avec les paramètres baseline
-            
-        Example:
-            .. testcode::
-            
-                model = InterpretableFTTPlus.make_baseline(
-                    n_num_features=5,
-                    cat_cardinalities=[3, 4, 10],
-                    d_token=128,
-                    n_blocks=3,
-                    attention_dropout=0.1,
-                    ffn_d_hidden=256,
-                    ffn_dropout=0.1,
-                    residual_dropout=0.0,
-                    d_out=1
-                )
-        """
+        attention_initialization: str = "kaiming",
+        attention_normalization: str = "LayerNorm",
+        ffn_activation: str = "ReGLU",
+        ffn_normalization: str = "LayerNorm",
+        prenormalization: bool = True,
+        head_activation: str = "ReLU",
+        head_normalization: str = "LayerNorm",
+        num_tokenizer: Optional[nn.Module] = None,
+        num_tokenizer_type: Optional[str] = "LR",
+    ) -> "InterpretableFTTPlus":
         config = cls.get_baseline_config()
         config.update({
-            'n_num_features': n_num_features,
-            'cat_cardinalities': cat_cardinalities,
-            'd_token': d_token,
-            'n_blocks': n_blocks,
-            'n_heads': n_heads,  #
-            'attention_dropout': attention_dropout,
-            'ffn_d_hidden': ffn_d_hidden,
-            'ffn_dropout': ffn_dropout,
-            'residual_dropout': residual_dropout,
-            'd_out': d_out,
-            'task_type': task_type,  # Ajout du paramètre task_type
-            'attention_mode': attention_mode,
+            "n_num_features": n_num_features, "d_token": d_token, "n_blocks": n_blocks, "n_heads": n_heads,
+            "attention_dropout": attention_dropout, "ffn_d_hidden": ffn_d_hidden, "ffn_dropout": ffn_dropout,
+            "residual_dropout": residual_dropout, "d_out": d_out, "attention_initialization": attention_initialization,
+            "attention_normalization": attention_normalization, "ffn_activation": ffn_activation,
+            "ffn_normalization": ffn_normalization, "prenormalization": prenormalization,
+            "head_activation": head_activation, "head_normalization": head_normalization, "num_tokenizer": num_tokenizer
         })
-        return cls(**config)
-    
-    def forward(self, x_num: Optional[Tensor], x_cat: Optional[Tensor]) -> Tensor:
-        """Forward pass du modèle.
-        
-        Args:
-            x_num: features numériques de forme (batch_size, n_num_features)
-            x_cat: features catégorielles de forme (batch_size, n_cat_features)
+        model = cls(**config)
+        if num_tokenizer is None and num_tokenizer_type:
+            from num_embedding_factory import get_num_embedding
             
-        Returns:
-            logits: scores de prédiction de forme (batch_size, d_out)
-        """
-        # Tokenisation des features
-        x = self.feature_tokenizer(x_num, x_cat)
-        
-        # Ajout du token CLS
+            model.feature_tokenizer.num_tokenizer = get_num_embedding(
+                embedding_type=num_tokenizer_type,
+                n_features=n_num_features,  # Passer n_num_features
+                d_embedding=d_token,
+            )
+            
+        return model
+
+    def forward(self, x_num: Tensor) -> Tensor:
+        x = self.feature_tokenizer(x_num, None)
         x = self.cls_token(x)
-        
-        # Passage à travers les blocs Transformer
         for block in self.blocks:
-            x, _ = block(x)
-        
-        # Classification à partir du token CLS
+            x = block(x)
         return self.head(x)
-    
-    def get_cls_importance(self, x_num, x_cat, feature_names=None, batch_size=64):
-        """Calcule l'importance des caractéristiques via l'attention du token CLS sur tout le dataset.
-        
-        Args:
-            x_num: Features numériques (tensor) de forme (n_samples, n_features)
-            x_cat: Features catégorielles (tensor) ou None
-            feature_names: Noms des caractéristiques pour le retour
-            batch_size: Taille des batches pour le traitement
-            
-        Returns:
-            Dictionnaire {feature: importance}
+
+    def get_cls_importance(self, x_num: Tensor, feature_names: Optional[List[str]] = None, batch_size: int = 64) -> Dict[str, Any]:
+        """Extrait et sauvegarde l'importance des features à partir des cartes d'attention.
+
+        Détails et conventions :
+        - Cette méthode attache un hook forward à chaque module d'attention pour collecter la
+          sortie meta renvoyée par InterpretableMultiHeadAttention, attendu sous la forme
+          (output_tensor, {"attention_probs": avg_attention}) où avg_attention a la forme
+          (batch_size, seq_len, seq_len) et correspond à la moyenne des probabilités d'attention
+          sur les têtes (grâce à sparsemax et au partage de V).
+        - Convention d'indexation dans cette implémentation : le token [CLS] est ajouté par
+          CLSToken à la FIN de la séquence. Par conséquent, la ligne correspondant au token CLS
+          est prise ici comme le dernier index (-1).
+        - Extraction : on lit la ligne CLS et on exclut la colonne correspondant au token CLS lui-même
+          pour obtenir les importances des J features -> average_attention_map[CLS_index, :-1].
+        - Remarque d'interprétabilité : les scores proviennent directement de sparsemax et sont
+          normalisés par ligne (somme = 1).
+
+        Retour :
+        Dictionnaire contenant :
+         - key: nom de la feature (ou feature_i) -> importance (float)
+         - _sorted_indices : indices triés par importance décroissante
+         - _ranks_array : rangs (1 = plus important)
+         - _saved_paths : chemins absolus des fichiers sauvegardés (.npy et .csv)
         """
-        # Hook pour collecter les cartes d'attention (déjà moyennées sur les têtes)
         hook = AttentionHook()
-        # Enregistrement des hooks sur chaque bloc d'attention
         handles = [block.attention.register_forward_hook(hook) for block in self.blocks]
-        
         try:
             self.eval()
-            with torch.no_grad():
-                # Traiter le dataset par batch
-                n_samples = x_num.size(0)  # Nombre total d'échantillons
-                for i in range(0, n_samples, batch_size):
-                    batch_x_num = x_num[i:i+batch_size]  # (batch_size, n_features)
-                    batch_x_cat = x_cat[i:i+batch_size] if x_cat is not None else None
-                    # Forward pass: produit une carte d'attention par bloc
-                    # Chaque carte: (batch_size, n_tokens, n_tokens)
-                    #   n_tokens = 1 (CLS) + n_features + (cat_features si présentes)
-                    self.forward(batch_x_num, batch_x_cat)
-                
+            with torch.inference_mode():
+                for i in range(0, x_num.size(0), batch_size):
+                    batch_x_num = x_num[i : i + batch_size]
+                    _ = self(batch_x_num)
+
                 if not hook.attention_maps:
+                    print("Aucune carte d'attention collectée.")
                     return {}
-                
-                # Concaténer toutes les cartes d'attention collectées
-                # hook.attention_maps: liste de tensors de forme (batch_size, n_tokens, n_tokens)
-                # Après concat: (total_batches * n_blocks, n_tokens, n_tokens)
-                #   total_batches = ceil(n_samples / batch_size)
-                all_attention = torch.cat(hook.attention_maps, dim=0)
-                
-                # Calcul de la moyenne globale sur toutes les cartes
-                # global_avg_attention: (n_tokens, n_tokens)
-                global_avg_attention = all_attention.mean(0)
-                
-                # Extraction de l'importance:
-                # - Position 0: token CLS
-                # - Positions 1: features (numériques et catégorielles)
-                # feature_importance: (n_features,)
-                #   où n_features = n_num_features + n_cat_features
-                feature_importance = global_avg_attention[0, 1:].cpu().numpy()
-                
-                # Formatage des résultats
-                if feature_names:
-                    return {name: imp for name, imp in zip(feature_names, feature_importance)}
-                return {f'feature_{i}': imp for i, imp in enumerate(feature_importance)}
-        
+
+                # attention_maps : (n_collections, batch, seq_len, seq_len)
+                attention_maps = torch.cat(hook.attention_maps, dim=0)
+                # moyenne sur collections et batchs -> (seq_len, seq_len)
+                average_attention_map = attention_maps.mean(dim=0)
+
+                # Ici, le CLS est le dernier token (convention CLSToken ajoutant à la fin).
+                # Si votre CLSToken préfixe au début, remplacer -1 par 0.
+                cls_index = -1
+                feature_importance = average_attention_map[cls_index, :-1].cpu().numpy()
+
+                feature_ranks = scipy.stats.rankdata(-feature_importance)
+                feature_indices_sorted = np.argsort(-feature_importance)
+
+                os.makedirs("results", exist_ok=True)
+                np.save("results/feature_importance.npy", feature_importance)
+                np.save("results/feature_ranks.npy", feature_ranks)
+
+                with open("results/feature_importance_and_ranks.csv", "w", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["feature_index", "importance", "rank"])
+                    for idx, imp, rank in zip(range(len(feature_importance)), feature_importance, feature_ranks):
+                        writer.writerow([idx, imp, rank])
+
+                result = {feature_names[i] if feature_names else f"feature_{i}": float(imp) for i, imp in enumerate(feature_importance)}
+                result["_sorted_indices"] = feature_indices_sorted.tolist()
+                result["_ranks_array"] = feature_ranks.tolist()
+                result["_saved_paths"] = {
+                    "npy_importance": os.path.abspath("results/feature_importance.npy"),
+                    "npy_ranks": os.path.abspath("results/feature_ranks.npy"),
+                    "csv": os.path.abspath("results/feature_importance_and_ranks.csv")
+                }
+                return result
         finally:
-            # Nettoyage des hooks
             for handle in handles:
                 handle.remove()
             hook.clear()
-    
-    
+
     def optimization_param_groups(self) -> List[Dict[str, Any]]:
-        """Groupes de paramètres optimisés pour l'entraînement.
-        
-        Suit la stratégie RTDL de différenciation du weight decay selon
-        le type de paramètres (embedding, normalisation, biais).
-        
-        Returns:
-            list: groupes de paramètres avec configurations de weight decay
-            
-        Example:
-            .. testcode::
-            
-                optimizer = torch.optim.AdamW(
-                    model.optimization_param_groups(), 
-                    lr=1e-4, 
-                    weight_decay=1e-5
-                )
-        """
-        no_wd_names = ['feature_tokenizer', 'normalization', '.bias']
-        
-        def needs_wd(name):
-            return all(x not in name for x in no_wd_names)
-        
+        NO_WD_NAMES = ["feature_tokenizer", "normalization", ".bias"]
         return [
-            {'params': [v for k, v in self.named_parameters() if needs_wd(k)]},
-            {
-                'params': [v for k, v in self.named_parameters() if not needs_wd(k)],
-                'weight_decay': 0.0,
-            },
+            {"params": [p for n, p in self.named_parameters() if all(s not in n for s in NO_WD_NAMES)]},
+            {"params": [p for n, p in self.named_parameters() if any(s in n for s in NO_WD_NAMES)], "weight_decay": 0.0}
         ]
-    
+
     def make_default_optimizer(self) -> torch.optim.AdamW:
-        """Crée l'optimiseur par défaut avec configuration RTDL.
-        
-        Returns:
-            AdamW: optimiseur configuré avec les meilleures pratiques
-        """
-        return torch.optim.AdamW(
-            self.optimization_param_groups(),
-            lr=1e-4,
-            weight_decay=1e-5,
-        )
+        return torch.optim.AdamW(self.optimization_param_groups(), lr=1e-4, weight_decay=1e-5)
