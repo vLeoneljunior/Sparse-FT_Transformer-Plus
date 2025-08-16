@@ -2,235 +2,26 @@
 import math
 import typing as ty
 from pathlib import Path
-import sys
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.nn.init as nn_init
 import zero
 from torch import Tensor
 
-# Ajouter le chemin vers le dossier parent pour importer nos modèles
-sys.path.append(str(Path(__file__).parent.parent.parent))
-
 import lib
-from sparse_ftt_plus.attention import InterpretableMultiHeadAttention
-from num_embedding_factory import get_num_embedding
-
-ModuleType = ty.Union[str, ty.Callable[..., nn.Module]]
-
-
-# %%
-class SparseFTTPlus(nn.Module):
-    """Sparse FT-Transformer Plus avec attention interprétable et embeddings P-LR.
-    
-    Cette implémentation combine l'architecture FT-Transformer de RTDL avec
-    l'attention sparsemax et les embeddings P-LR avancés pour améliorer les
-    performances et l'interprétabilité sur les données tabulaires.
-    
-    Le modèle utilise automatiquement les embeddings P-LR pour les variables continues
-    et gère la classification et la régression selon le dataset.
-    
-    References:
-    - Gorishniy et al. "Revisiting Deep Learning Models for Tabular Data" (NeurIPS 2021)
-    - Gorishniy et al. "On Embeddings for Numerical Features in Tabular Deep Learning" (ICLR 2022)
-    - Martins & Astudillo "From Softmax to Sparsemax: A Sparse Model of Attention and Multi-Label Classification" (ICML 2016)
-    - Lim et al. "Temporal Fusion Transformers for Interpretable Multi-horizon Time Series Forecasting" (International Journal of Forecasting 2021)
-    """
-
-    def __init__(
-        self,
-        *,
-        # Architecture de base
-        d_numerical: int,
-        categories: ty.Optional[ty.List[int]],
-        d_token: int,
-        n_blocks: int,
-        n_heads: int,
-        # Attention configuration
-        attention_dropout: float,
-        attention_initialization: str,
-        attention_normalization: ModuleType,
-        attention_mode: str,
-        # FFN configuration
-        ffn_d_hidden: int,
-        ffn_dropout: float,
-        ffn_activation: ModuleType,
-        ffn_normalization: ModuleType,
-        # Autres paramètres
-        residual_dropout: float,
-        prenormalization: bool,
-        head_activation: ModuleType,
-        head_normalization: ModuleType,
-        d_out: int,
-    ) -> None:
-        super().__init__()
-        
-        # Import des modules RTDL nécessaires
-        from rtdl_lib.modules import FeatureTokenizer, CLSToken, _make_nn_module
-        
-        # Feature Tokenizer RTDL standard (sera modifié après)
-        self.feature_tokenizer = FeatureTokenizer(
-            n_num_features=d_numerical,
-            cat_cardinalities=categories or [],
-            d_token=d_token
-        )
-        
-        # Token CLS pour l'inférence BERT-like
-        self.cls_token = CLSToken(d_token, self.feature_tokenizer.initialization)
-        
-        # Blocs Transformer avec attention interprétable
-        self.blocks = nn.ModuleList([
-            self._make_transformer_block(
-                d_token=d_token,
-                n_heads=n_heads,
-                attention_dropout=attention_dropout,
-                attention_initialization=attention_initialization,
-                attention_normalization=attention_normalization,
-                attention_mode=attention_mode,
-                ffn_d_hidden=ffn_d_hidden,
-                ffn_dropout=ffn_dropout,
-                ffn_activation=ffn_activation,
-                ffn_normalization=ffn_normalization,
-                residual_dropout=residual_dropout,
-                prenormalization=prenormalization,
-            )
-            for _ in range(n_blocks)
-        ])
-        
-        # Configuration
-        self.prenormalization = prenormalization
-        self.residual_dropout = residual_dropout
-        
-        # Normalisation finale et tête de prédiction
-        self.last_normalization = (
-            _make_nn_module(head_normalization, d_token) 
-            if prenormalization else None
-        )
-        self.head_activation = lib.get_nonglu_activation_fn(head_activation)
-        self.head = nn.Linear(d_token, d_out)
-    
-    def _make_transformer_block(
-        self,
-        d_token: int,
-        n_heads: int,
-        attention_dropout: float,
-        attention_initialization: str,
-        attention_normalization: ModuleType,
-        attention_mode: str,
-        ffn_d_hidden: int,
-        ffn_dropout: float,
-        ffn_activation: ModuleType,
-        ffn_normalization: ModuleType,
-        residual_dropout: float,
-        prenormalization: bool,
-    ) -> nn.ModuleDict:
-        """Crée un bloc Transformer avec attention interprétable."""
-        
-        from rtdl_lib.modules import _make_nn_module, Transformer
-        
-        block = nn.ModuleDict({
-            'attention': InterpretableMultiHeadAttention(
-                d_model=d_token,
-                n_heads=n_heads,
-                dropout=attention_dropout,
-                initialization=attention_initialization,
-                attention_mode=attention_mode
-            ),
-            'norm1': _make_nn_module(attention_normalization, d_token),
-        })
-        
-        if not prenormalization:
-            block['norm0'] = _make_nn_module(attention_normalization, d_token)
-        
-        # FFN utilisant l'implémentation RTDL
-        block['ffn'] = Transformer.FFN(
-            d_token=d_token,
-            d_hidden=ffn_d_hidden,
-            bias_first=True,
-            bias_second=True,
-            dropout=ffn_dropout,
-            activation=ffn_activation
-        )
-        
-        block['norm_ffn'] = _make_nn_module(ffn_normalization, d_token)
-        
-        return block
-    
-    def _start_residual(self, x: Tensor, block: nn.ModuleDict, stage: str) -> Tensor:
-        """Démarre une connexion résiduelle avec normalisation pré/post."""
-        if self.prenormalization:
-            if stage == 'attention':
-                return block.get('norm0', lambda x: x)(x)
-            else:  # stage == 'ffn'
-                return block['norm1'](x)
-        return x
-    
-    def _end_residual(self, x: Tensor, x_residual: Tensor, block: nn.ModuleDict, stage: str) -> Tensor:
-        """Termine une connexion résiduelle avec dropout et normalisation."""
-        if self.residual_dropout:
-            x_residual = F.dropout(x_residual, self.residual_dropout, self.training)
-        
-        x = x + x_residual
-        
-        if not self.prenormalization:
-            if stage == 'attention':
-                x = block.get('norm0', lambda x: x)(x)
-            else:  # stage == 'ffn'
-                x = block['norm1'](x)
-        
-        return x
-
-    def forward(self, x_num: ty.Optional[Tensor], x_cat: ty.Optional[Tensor]) -> Tensor:
-        """Forward pass unifié pour classification et régression."""
-        # Tokenisation des features
-        x = self.feature_tokenizer(x_num, x_cat)
-        
-        # Ajout du token CLS
-        x = self.cls_token(x)
-        
-        # Passage à travers les blocs Transformer
-        for block_idx, block in enumerate(self.blocks):
-            is_last_block = block_idx + 1 == len(self.blocks)
-            
-            # Bloc d'attention avec connexion résiduelle
-            x_residual = self._start_residual(x, block, 'attention')
-            
-            # Pour le dernier bloc, on peut optimiser en ne traitant que le token CLS
-            if is_last_block:
-                x_residual, _ = block['attention'](x_residual[:, :1], x_residual)
-                x = x[:, :x_residual.shape[1]]  # Ajuster la taille
-            else:
-                x_residual, _ = block['attention'](x_residual)
-            
-            x = self._end_residual(x, x_residual, block, 'attention')
-            
-            # Bloc FFN avec connexion résiduelle
-            x_residual = self._start_residual(x, block, 'ffn')
-            x_residual = block['ffn'](x_residual)
-            x = self._end_residual(x, x_residual, block, 'ffn')
-        
-        # Extraction du token CLS et prédiction finale
-        assert x.shape[1] == 1, f"Expected 1 token, got {x.shape[1]}"
-        x = x[:, 0]  # Extraire le token CLS
-        
-        if self.last_normalization is not None:
-            x = self.last_normalization(x)
-        
-        x = self.head_activation(x)
-        x = self.head(x)
-        x = x.squeeze(-1)
-        
-        return x
+from sparse_ftt_plus import InterpretableFTTPlus
 
 
 # %%
 if __name__ == "__main__":
     args, output = lib.load_config()
-    
-    # Paramètres par défaut pour Sparse FTT+
-    args['model'].setdefault('attention_mode', 'hybrid')
+    # defaults specific to sparse FTT+
+    args['model'].setdefault('attention_dropout', 0.0)
+    args['model'].setdefault('residual_dropout', 0.0)
+    args['model'].setdefault('ffn_dropout', 0.0)
     args['model'].setdefault('attention_initialization', 'kaiming')
     args['model'].setdefault('attention_normalization', 'LayerNorm')
     args['model'].setdefault('ffn_activation', 'ReGLU')
@@ -238,8 +29,8 @@ if __name__ == "__main__":
     args['model'].setdefault('prenormalization', True)
     args['model'].setdefault('head_activation', 'ReLU')
     args['model'].setdefault('head_normalization', 'LayerNorm')
+    args['model'].setdefault('n_heads', 8)
 
-    # %%
     zero.set_randomness(args['seed'])
     dataset_dir = lib.get_path(args['data']['path'])
     stats: ty.Dict[str, ty.Any] = {
@@ -292,61 +83,65 @@ if __name__ == "__main__":
         if D.is_multiclass
         else F.mse_loss
     )
-    
-    # Créer le modèle Sparse FTT+
-    model = SparseFTTPlus(
-        d_numerical=0 if X_num is None else X_num['train'].shape[1],
-        categories=lib.get_categories(X_cat),
-        d_out=D.info['n_classes'] if D.is_multiclass else 1,
-        **args['model'],
+
+    # instantiate InterpretableFTTPlus
+    n_num = 0 if X_num is None else X_num['train'].shape[1]
+    d_out = D.info['n_classes'] if D.is_multiclass else 1
+
+    model = InterpretableFTTPlus.make_baseline(
+        n_num_features=n_num,
+        d_token=args['model'].get('d_token'),
+        n_blocks=args['model'].get('n_blocks'),
+        n_heads=args['model'].get('n_heads'),
+        attention_dropout=args['model'].get('attention_dropout'),
+        ffn_d_hidden=args['model'].get('ffn_d_hidden'),
+        ffn_dropout=args['model'].get('ffn_dropout'),
+        residual_dropout=args['model'].get('residual_dropout'),
+        d_out=d_out,
+        attention_initialization=args['model'].get('attention_initialization'),
+        attention_normalization=args['model'].get('attention_normalization'),
+        ffn_activation=args['model'].get('ffn_activation'),
+        ffn_normalization=args['model'].get('ffn_normalization'),
+        prenormalization=args['model'].get('prenormalization'),
+        head_activation=args['model'].get('head_activation'),
+        head_normalization=args['model'].get('head_normalization'),
+        num_tokenizer=None,
     ).to(device)
     
-    # ==========================================
-    # INTEGRATION DES EMBEDDINGS P-LR AVANCES
-    # ==========================================
-    if X_num is not None and model.feature_tokenizer.num_tokenizer is not None:
-        print("Intégration des embeddings P-LR pour les variables continues...")
-        
-        # Type d'embedding à utiliser (P-LR par défaut)
-        embedding_type = args['model'].get('embedding_type', 'P-LR')
-        print(f"Type d'embedding numérique: {embedding_type}")
-
-        # Forcer les tenseurs sur CPU pour éviter le warning rtdl_num_embeddings
-        X_train_cpu = X_num['train'].cpu()
-        
-        # Créer l'embedding P-LR avancé
-        num_embedding = get_num_embedding(
-            embedding_type=embedding_type,
-            X_train=X_train_cpu,
-            d_embedding=args['model']['d_token'],
-            y_train=Y['train'] if embedding_type in ("T", "T-L", "T-LR", "T-LR-LR") else None
-        )
-        
-        # Remplacer l'embedding numérique par défaut
-        model.feature_tokenizer.num_tokenizer = num_embedding
-        print(f"Embedding numérique remplacé par {embedding_type}")
+    # If categorical features are present, attach a categorical tokenizer so both
+    # numerical and categorical features are handled.
+    if X_cat is not None:
+        categories = lib.get_categories(X_cat)
+        if categories:
+            from rtdl_lib.modules import CategoricalFeatureTokenizer
+            # use the same d_token / initialization as the numerical tokenizer
+            model.feature_tokenizer.cat_tokenizer = CategoricalFeatureTokenizer(
+                categories,
+                model.feature_tokenizer.d_token,
+                True,
+                model.feature_tokenizer.initialization,
+            )
+            model.feature_tokenizer.cat_tokenizer.to(device)
     
-    if torch.cuda.device_count() > 1:  # type: ignore[code]
+    if torch.cuda.device_count() > 1:
         print('Using nn.DataParallel')
         model = nn.DataParallel(model)
     stats['n_parameters'] = lib.get_n_parameters(model)
 
-    # Groupes de paramètres optimisés (style RTDL)
-    def needs_wd(name):
-        return all(x not in name for x in ['feature_tokenizer', '.norm', '.bias'])
+    # optimizer param groups from model if available
+    if hasattr(model, 'optimization_param_groups'):
+        param_groups = model.optimization_param_groups()
+    else:
+        def needs_wd(name):
+            return all(x not in name for x in ['tokenizer', '.norm', '.bias'])
 
-    for x in ['feature_tokenizer', '.norm', '.bias']:
-        assert any(x in a for a in (b[0] for b in model.named_parameters()))
-    parameters_with_wd = [v for k, v in model.named_parameters() if needs_wd(k)]
-    parameters_without_wd = [v for k, v in model.named_parameters() if not needs_wd(k)]
+        parameters_with_wd = [v for k, v in model.named_parameters() if needs_wd(k)]
+        parameters_without_wd = [v for k, v in model.named_parameters() if not needs_wd(k)]
+        param_groups = [{'params': parameters_with_wd}, {'params': parameters_without_wd, 'weight_decay': 0.0}]
+
     optimizer = lib.make_optimizer(
         args['training']['optimizer'],
-        (
-            [
-                {'params': parameters_with_wd},
-                {'params': parameters_without_wd, 'weight_decay': 0.0},
-            ]
-        ),
+        param_groups,
         args['training']['lr'],
         args['training']['weight_decay'],
     )
@@ -373,10 +168,17 @@ if __name__ == "__main__":
         )
 
     def apply_model(part, idx):
-        return model(
-            None if X_num is None else X_num[part][idx],
-            None if X_cat is None else X_cat[part][idx],
-        )
+        # Support both numerical and categorical inputs. If model was wrapped with
+        # nn.DataParallel, access the underlying module.
+        real_model = model.module if isinstance(model, nn.DataParallel) else model
+        x_num_batch = None if X_num is None else X_num[part][idx]
+        x_cat_batch = None if X_cat is None else X_cat[part][idx]
+        # Build tokens using feature_tokenizer (handles num and cat)
+        tokens = real_model.feature_tokenizer(x_num_batch, x_cat_batch)
+        tokens = real_model.cls_token(tokens)
+        for block in real_model.blocks:
+            tokens = block(tokens)
+        return real_model.head(tokens)
 
     @torch.no_grad()
     def evaluate(parts):
