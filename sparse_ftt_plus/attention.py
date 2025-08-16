@@ -100,7 +100,8 @@ class InterpretableMultiHeadAttention(nn.Module):
     Formats :
     - x : (batch_size, seq_len, d_model)
     - Retour : (x_out, {"attention_probs": avg_attention}) où avg_attention a la forme (batch_size, seq_len, seq_len)
-      et peut être utilisée pour extraire l'importance du token [CLS] via avg_attention[:, 0, 1:].
+      et doit être utilisée en tenant compte que le token [CLS] est ajouté EN FIN de la séquence :
+      pour obtenir l'importance du token [CLS] utilisez avg_attention[:, -1, :-1] (cls_index = -1).
     """
     def __init__(self, d_model: int, n_heads: int, dropout: float = 0.0, initialization: str = "kaiming"):
         super().__init__()
@@ -157,8 +158,8 @@ class InterpretableMultiHeadAttention(nn.Module):
               - meta dict contenant "attention_probs" : matrice moyennée (batch_size, seq_len, seq_len).
         
         Notes d'interprétabilité :
-        - Pour obtenir l'importance des features pour la prédiction (token [CLS]), lire la ligne 0 de
-          la matrice renvoyée : avg_attention[:, 0, :] (ou avg_attention[0, 1:] si on omet le token CLS lui-même).
+        - Pour obtenir l'importance des features pour la prédiction (token [CLS]), lire la DERNIÈRE ligne de
+          la matrice renvoyée : avg_attention[:, -1, :] (ou avg_attention[:, -1, :-1] si on omet le token CLS lui-même).
         - Les valeurs sont normalisées par ligne (somme = 1) et, grâce à sparsemax, sont souvent creuses,
           facilitant l'identification des features réellement influentes.
         """
