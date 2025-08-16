@@ -1,4 +1,3 @@
-# %%
 import math
 import typing as ty
 from pathlib import Path
@@ -7,18 +6,16 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.nn.init as nn_init
 import zero
 from torch import Tensor
 
 import lib
 from sparse_ftt_plus import InterpretableFTTPlus
 
-
 # %%
 if __name__ == "__main__":
     args, output = lib.load_config()
-    # defaults specific to sparse FTT+
+    # Defaults specific to sparse FTT+
     args['model'].setdefault('attention_dropout', 0.0)
     args['model'].setdefault('residual_dropout', 0.0)
     args['model'].setdefault('ffn_dropout', 0.0)
@@ -30,7 +27,11 @@ if __name__ == "__main__":
     args['model'].setdefault('head_activation', 'ReLU')
     args['model'].setdefault('head_normalization', 'LayerNorm')
     args['model'].setdefault('n_heads', 8)
+    args['model'].setdefault('num_tokenizer', False)  # Par défaut : tokenizer numérique standard
+    args['model'].setdefault('num_tokenizer_type', 'LR')  # Par défaut pour tokenizer personnalisé
+    args['model'].setdefault('d_ffn_factor', 1.333)  # Facteur pour calculer ffn_d_hidden
 
+    # %%
     zero.set_randomness(args['seed'])
     dataset_dir = lib.get_path(args['data']['path'])
     stats: ty.Dict[str, ty.Any] = {
@@ -84,17 +85,23 @@ if __name__ == "__main__":
         else F.mse_loss
     )
 
-    # instantiate InterpretableFTTPlus
+    # Instantiate InterpretableFTTPlus
     n_num = 0 if X_num is None else X_num['train'].shape[1]
     d_out = D.info['n_classes'] if D.is_multiclass else 1
+    cat_cardinalities = lib.get_categories(X_cat) if X_cat is not None else None
+    # Calculer ffn_d_hidden si non spécifié
+    ffn_d_hidden = args['model'].get('ffn_d_hidden')
+    if ffn_d_hidden is None:
+        ffn_d_hidden = int(args['model']['d_token'] * args['model']['d_ffn_factor'])
 
     model = InterpretableFTTPlus.make_baseline(
         n_num_features=n_num,
+        cat_cardinalities=cat_cardinalities,
         d_token=args['model'].get('d_token'),
         n_blocks=args['model'].get('n_blocks'),
         n_heads=args['model'].get('n_heads'),
         attention_dropout=args['model'].get('attention_dropout'),
-        ffn_d_hidden=args['model'].get('ffn_d_hidden'),
+        ffn_d_hidden=ffn_d_hidden,
         ffn_dropout=args['model'].get('ffn_dropout'),
         residual_dropout=args['model'].get('residual_dropout'),
         d_out=d_out,
@@ -105,43 +112,19 @@ if __name__ == "__main__":
         prenormalization=args['model'].get('prenormalization'),
         head_activation=args['model'].get('head_activation'),
         head_normalization=args['model'].get('head_normalization'),
-        num_tokenizer=None,
+        num_tokenizer=args['model'].get('num_tokenizer'),
+        num_tokenizer_type=args['model'].get('num_tokenizer_type'),
     ).to(device)
-    
-    # If categorical features are present, attach a categorical tokenizer so both
-    # numerical and categorical features are handled.
-    if X_cat is not None:
-        categories = lib.get_categories(X_cat)
-        if categories:
-            from rtdl_lib.modules import CategoricalFeatureTokenizer
-            # use the same d_token / initialization as the numerical tokenizer
-            model.feature_tokenizer.cat_tokenizer = CategoricalFeatureTokenizer(
-                categories,
-                model.feature_tokenizer.d_token,
-                True,
-                model.feature_tokenizer.initialization,
-            )
-            model.feature_tokenizer.cat_tokenizer.to(device)
-    
+
     if torch.cuda.device_count() > 1:
         print('Using nn.DataParallel')
         model = nn.DataParallel(model)
     stats['n_parameters'] = lib.get_n_parameters(model)
 
-    # optimizer param groups from model if available
-    if hasattr(model, 'optimization_param_groups'):
-        param_groups = model.optimization_param_groups()
-    else:
-        def needs_wd(name):
-            return all(x not in name for x in ['tokenizer', '.norm', '.bias'])
-
-        parameters_with_wd = [v for k, v in model.named_parameters() if needs_wd(k)]
-        parameters_without_wd = [v for k, v in model.named_parameters() if not needs_wd(k)]
-        param_groups = [{'params': parameters_with_wd}, {'params': parameters_without_wd, 'weight_decay': 0.0}]
-
+    # Utiliser optimization_param_groups de InterpretableFTTPlus
     optimizer = lib.make_optimizer(
         args['training']['optimizer'],
-        param_groups,
+        model.optimization_param_groups(),
         args['training']['lr'],
         args['training']['weight_decay'],
     )
@@ -168,17 +151,10 @@ if __name__ == "__main__":
         )
 
     def apply_model(part, idx):
-        # Support both numerical and categorical inputs. If model was wrapped with
-        # nn.DataParallel, access the underlying module.
         real_model = model.module if isinstance(model, nn.DataParallel) else model
         x_num_batch = None if X_num is None else X_num[part][idx]
         x_cat_batch = None if X_cat is None else X_cat[part][idx]
-        # Build tokens using feature_tokenizer (handles num and cat)
-        tokens = real_model.feature_tokenizer(x_num_batch, x_cat_batch)
-        tokens = real_model.cls_token(tokens)
-        for block in real_model.blocks:
-            tokens = block(tokens)
-        return real_model.head(tokens)
+        return real_model(x_num_batch, x_cat_batch)
 
     @torch.no_grad()
     def evaluate(parts):
@@ -210,11 +186,11 @@ if __name__ == "__main__":
                 else:
                     break
             if not eval_batch_size:
-                RuntimeError('Not enough memory even for eval_batch_size=1')
+                raise RuntimeError('Not enough memory even for eval_batch_size=1')
             metrics[part] = lib.calculate_metrics(
                 D.info['task_type'],
-                Y[part].numpy(),  # type: ignore[code]
-                predictions[part],  # type: ignore[code]
+                Y[part].numpy(),
+                predictions[part],
                 'logits',
                 y_info,
             )
