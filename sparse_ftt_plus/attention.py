@@ -27,6 +27,12 @@ Principe et justification (résumé) :
 
 Ce module implémente ces principes en gardant une API simple compatible avec l'utilisation
 dans un bloc Transformer standard.
+
+Améliorations computationnelles intégrées :
+- V partagé calculé directement via une projection unique au lieu de moyenner post-projection
+- Scaling pré-intégré dans les poids Q pour éviter la division répétitive
+- Opérations de reshape et transpose réduites au minimum
+- Memory layout optimisé pour réduire les copies de tenseurs
 """
 
 sparsemax = Sparsemax(dim=-1)
@@ -45,17 +51,30 @@ class MultiheadAttention(nn.Module):
 
         self.n_heads = n_heads
         self.d_token = d_token
+        self.d_head = d_token // n_heads
+        self.scale = 1.0 / math.sqrt(self.d_head)  # Pré-calcul du facteur de scaling
+        
         self.W_q = nn.Linear(d_token, d_token, bias=True)
         self.W_k = nn.Linear(d_token, d_token, bias=True)
         self.W_v = nn.Linear(d_token, d_token, bias=True)
         self.W_out = nn.Linear(d_token, d_token, bias=True) if n_heads > 1 else None
         self.dropout = nn.Dropout(dropout) if dropout > 0.0 else None
 
+        # Initialisation avec scaling intégré pour Q
         for m in [self.W_q, self.W_k, self.W_v]:
             if initialization == 'xavier':
                 nn.init.xavier_uniform_(m.weight, gain=1 / math.sqrt(2))
+            elif initialization == 'kaiming':
+                nn.init.kaiming_uniform_(m.weight, mode='fan_in', nonlinearity='linear')
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
+                
+        # Intégration du scaling dans les poids de Q
+        with torch.no_grad():
+            self.W_q.weight.mul_(self.scale)
+            if self.W_q.bias is not None:
+                self.W_q.bias.mul_(self.scale)
+                
         if self.W_out is not None and self.W_out.bias is not None:
             nn.init.zeros_(self.W_out.bias)
 
@@ -66,8 +85,7 @@ class MultiheadAttention(nn.Module):
         Sortie : (batch_size * n_heads, seq_len, d_head)
         """
         batch_size, n_tokens, d = x.shape
-        d_head = d // self.n_heads
-        return x.reshape(batch_size, n_tokens, self.n_heads, d_head).transpose(1, 2).reshape(batch_size * self.n_heads, n_tokens, d_head)
+        return x.view(batch_size * self.n_heads, n_tokens, self.d_head)
 
 class InterpretableMultiHeadAttention(nn.Module):
     """Attention multi-tête interprétable avec sparsemax et V partagé.
@@ -76,9 +94,8 @@ class InterpretableMultiHeadAttention(nn.Module):
     - Calcule Q, K, V à partir de la même entrée X.
     - Applique sparsemax sur les logits QK^T / sqrt(d_head) pour obtenir des probabilités creuses
       tête-par-tête.
-    - Construit V partagé en moyennant les composantes V sur les têtes (évite les distorsions dues à V_h).
-    - Réplique V partagé pour chaque tête et calcule la sortie attentionnée.
-    - Retourne également la matrice d'attention moyenne sur les têtes pour permettre l'interprétabilité.
+    - Utilise un V partagé calculé directement via une projection unique vers d_head.
+    - Applique l'attention et retourne la matrice d'attention moyenne pour l'interprétabilité.
     
     Formats :
     - x : (batch_size, seq_len, d_model)
@@ -88,21 +105,48 @@ class InterpretableMultiHeadAttention(nn.Module):
     def __init__(self, d_model: int, n_heads: int, dropout: float = 0.0, initialization: str = "kaiming"):
         super().__init__()
         self.n_heads = n_heads
-        self.base_mha = MultiheadAttention(d_token=d_model, n_heads=n_heads, dropout=dropout, initialization=initialization)
-        self.dropout = self.base_mha.dropout
+        self.d_model = d_model
+        self.d_head = d_model // n_heads
+        
+        # Projections Q, K classiques
+        self.W_q = nn.Linear(d_model, d_model, bias=True)
+        self.W_k = nn.Linear(d_model, d_model, bias=True)
+        
+        # V partagé : projection directe vers d_head au lieu de moyenner après projection complète
+        self.W_v_shared = nn.Linear(d_model, self.d_head, bias=True)
+        
+        self.W_out = nn.Linear(d_model, d_model, bias=True) if n_heads > 1 else None
+        self.dropout = nn.Dropout(dropout) if dropout > 0.0 else None
+        
+        # Pré-calcul du facteur de scaling
+        scale = 1.0 / math.sqrt(self.d_head)
+        
+        # Initialisation
+        for m in [self.W_q, self.W_k, self.W_v_shared]:
+            if initialization == 'xavier':
+                nn.init.xavier_uniform_(m.weight, gain=1 / math.sqrt(2))
+            elif initialization == 'kaiming':
+                nn.init.kaiming_uniform_(m.weight, mode='fan_in', nonlinearity='linear')
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        
+        # Intégration du scaling dans les poids de Q pour éviter la division à chaque forward
+        with torch.no_grad():
+            self.W_q.weight.mul_(scale)
+            if self.W_q.bias is not None:
+                self.W_q.bias.mul_(scale)
 
-    def _average_attention_probs(self, attention_probs: Tensor, batch_size: int, seq_len: int) -> Tensor:
+    def _average_attention_probs(self, attention_probs: Tensor) -> Tensor:
         """Moyenne les probabilités d'attention sur les têtes.
 
-        attention_probs : (batch_size * n_heads, seq_len, seq_len)
+        attention_probs : (batch_size, n_heads, seq_len, seq_len)
         Retour : (batch_size, seq_len, seq_len) moyenné sur l'axe tête.
         """
-        ap = attention_probs.view(batch_size, self.n_heads, seq_len, seq_len)
-        return ap.mean(dim=1)
+        return attention_probs.mean(dim=1)
 
     def forward(self, x: Tensor) -> Tuple[Tensor, Dict[str, Tensor]]:
         """
-        Forward pass avec sparsemax et V partagé.
+        Forward pass avec sparsemax et V partagé calculé efficacement.
 
         Args:
             x: Tensor d'entrée de forme (batch_size, seq_len, d_model).
@@ -119,46 +163,40 @@ class InterpretableMultiHeadAttention(nn.Module):
           facilitant l'identification des features réellement influentes.
         """
         batch_size, seq_len, d_model = x.shape
-
-        # Projections Q, K, V
-        q = self.base_mha.W_q(x)  # (batch_size, seq_len, d_model)
-        k = self.base_mha.W_k(x)
-        v = self.base_mha.W_v(x)
-
-        # Reshape pour têtes
-        qh = self.base_mha._split_to_heads(q)  # (batch_size * n_heads, seq_len, d_head)
-        kh = self.base_mha._split_to_heads(k)
-        vh_full = self.base_mha._split_to_heads(v)
-
-        d_head = vh_full.shape[-1]
-
-        # Calcul des logits d'attention
-        attention_logits = qh @ kh.transpose(1, 2) / math.sqrt(d_head)  # (batch_size * n_heads, seq_len, seq_len)
-
-        # Sparsemax pour probabilités creuses (tête-par-tête)
+        
+        # Projections - Q (avec scaling pré-intégré), K, V_shared (direct)
+        q = self.W_q(x)  # (batch_size, seq_len, d_model) - scaling déjà appliqué
+        k = self.W_k(x)  # (batch_size, seq_len, d_model)
+        v_shared = self.W_v_shared(x)  # (batch_size, seq_len, d_head) - projection directe !
+        
+        # Reshape pour têtes (Q, K seulement)
+        q = q.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)  # (B, H, T, d_head)
+        k = k.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)  # (B, H, T, d_head)
+        
+        # Calcul des logits d'attention (pas de division par sqrt(d_head) car intégré dans W_q)
+        attention_logits = torch.matmul(q, k.transpose(-2, -1))  # (B, H, T, T)
+        
+        # Sparsemax par tête
         attention_probs = sparsemax(attention_logits)
         if self.dropout is not None:
             attention_probs = self.dropout(attention_probs)
-
-        # V partagé : on moyenner les composantes V sur l'axe tête pour obtenir W_V commun implicite
-        v_resh = v.reshape(batch_size, seq_len, self.n_heads, d_head)
-        v_shared = v_resh.mean(dim=2)  # (batch_size, seq_len, d_head)
-        # Répliquer V partagé pour chaque tête afin d'aligner les dimensions pour le produit attention*V
-        v_shared_rep = v_shared.unsqueeze(2).expand(-1, -1, self.n_heads, -1)
-        vh = v_shared_rep.transpose(1, 2).reshape(batch_size * self.n_heads, seq_len, d_head)
-
+        
+        # Application de l'attention au V partagé
+        # v_shared: (B, T, d_head), on l'expand pour toutes les têtes
+        v_expanded = v_shared.unsqueeze(1).expand(batch_size, self.n_heads, seq_len, self.d_head)  # (B, H, T, d_head)
+        
         # Sortie d'attention
-        x_out = attention_probs @ vh  # (batch_size * n_heads, seq_len, d_head)
-        x_out = (
-            x_out.reshape(batch_size, self.n_heads, seq_len, d_head)
-            .transpose(1, 2)
-            .reshape(batch_size, seq_len, self.n_heads * d_head)
-        )
-        if self.base_mha.W_out is not None:
-            x_out = self.base_mha.W_out(x_out)
-
-        # Moyenne des probabilités d'attention sur les têtes -> utilité interprétabilité
-        avg_attention = self._average_attention_probs(attention_probs, batch_size, seq_len)
+        x_out = torch.matmul(attention_probs, v_expanded)  # (B, H, T, d_head)
+        
+        # Concaténation des têtes
+        x_out = x_out.transpose(1, 2).contiguous().view(batch_size, seq_len, d_model)
+        
+        if self.W_out is not None:
+            x_out = self.W_out(x_out)
+        
+        # Moyenne des probabilités d'attention pour interprétabilité
+        avg_attention = self._average_attention_probs(attention_probs)
+        
         return x_out, {"attention_probs": avg_attention}
 
     def get_attention_weights(self, x: Tensor) -> Tensor:
