@@ -87,7 +87,7 @@ model.feature_tokenizer.num_tokenizer = num_embedding
 # =========================
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-5)
 loss_fn = nn.MSELoss()
-n_epochs = 20
+n_epochs = 50
 batch_size = 64
 
 n_parameters = sum(p.numel() for p in model.parameters())

@@ -1,4 +1,5 @@
-"""Interpretable FT-Transformer (sparse + shared-V)
+"""
+Interpretable FT-Transformer (sparse + shared-V)
 
 Ce module implémente une variante interprétable du FT-Transformer adaptée aux données
 tabulaires. Principes clés (résumé) :
@@ -19,7 +20,6 @@ Fonctionnalités exposées :
 - InterpretableTransformerBlock : bloc Transformer utilisant l'attention interprétable.
 - InterpretableFTTPlus : modèle complet (tokenizer + blocs + head) et utilitaire
   get_cls_importance() qui collecte, moyenne et sauvegarde les importances par feature.
-
 """
 
 import torch
@@ -29,7 +29,7 @@ import numpy as np
 import scipy.stats
 import os
 import csv
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from .attention import InterpretableMultiHeadAttention
 from rtdl_lib.modules import FeatureTokenizer, CLSToken, _make_nn_module
 
@@ -119,12 +119,26 @@ class InterpretableFTTPlus(nn.Module):
         head_activation: str,
         head_normalization: str,
         d_out: int,
-        num_tokenizer: Optional[nn.Module] = None,
+        cat_cardinalities: Optional[List[int]] = None,
+        num_tokenizer: bool = False,
+        num_tokenizer_type: Optional[str] = "LR",
     ) -> None:
         super().__init__()
-        self.feature_tokenizer = FeatureTokenizer(n_num_features=n_num_features, cat_cardinalities=None, d_token=d_token)
+        self.cat_cardinalities = cat_cardinalities  # Stocker cat_cardinalities
+        self.feature_tokenizer = FeatureTokenizer(
+            n_num_features=n_num_features,
+            cat_cardinalities=cat_cardinalities,
+            d_token=d_token,
+        )
         if num_tokenizer:
-            self.feature_tokenizer.num_tokenizer = num_tokenizer
+            if num_tokenizer_type is None:
+                raise ValueError("num_tokenizer_type must be specified when num_tokenizer=True")
+            from num_embedding_factory import get_num_embedding
+            self.feature_tokenizer.num_tokenizer = get_num_embedding(
+                embedding_type=num_tokenizer_type,
+                n_features=n_num_features,
+                d_embedding=d_token,
+            )
         self.cls_token = CLSToken(d_token, self.feature_tokenizer.initialization)
         self.blocks = nn.ModuleList([
             InterpretableTransformerBlock(
@@ -166,6 +180,7 @@ class InterpretableFTTPlus(nn.Module):
         ffn_dropout: float,
         residual_dropout: float,
         d_out: int,
+        cat_cardinalities: Optional[List[int]] = None,
         attention_initialization: str = "kaiming",
         attention_normalization: str = "LayerNorm",
         ffn_activation: str = "ReGLU",
@@ -173,69 +188,82 @@ class InterpretableFTTPlus(nn.Module):
         prenormalization: bool = True,
         head_activation: str = "ReLU",
         head_normalization: str = "LayerNorm",
-        num_tokenizer: Optional[nn.Module] = None,
+        num_tokenizer: bool = False,  # False -> Use default NumericalFeatureTokenizer from rtdl_lib
+                                      # True -> Use custom numeric embedding via get_num_embedding
         num_tokenizer_type: Optional[str] = "LR",
     ) -> "InterpretableFTTPlus":
         config = cls.get_baseline_config()
         config.update({
-            "n_num_features": n_num_features, "d_token": d_token, "n_blocks": n_blocks, "n_heads": n_heads,
-            "attention_dropout": attention_dropout, "ffn_d_hidden": ffn_d_hidden, "ffn_dropout": ffn_dropout,
-            "residual_dropout": residual_dropout, "d_out": d_out, "attention_initialization": attention_initialization,
-            "attention_normalization": attention_normalization, "ffn_activation": ffn_activation,
-            "ffn_normalization": ffn_normalization, "prenormalization": prenormalization,
-            "head_activation": head_activation, "head_normalization": head_normalization, "num_tokenizer": num_tokenizer
+            "n_num_features": n_num_features,
+            "d_token": d_token,
+            "n_blocks": n_blocks,
+            "n_heads": n_heads,
+            "attention_dropout": attention_dropout,
+            "ffn_d_hidden": ffn_d_hidden,
+            "ffn_dropout": ffn_dropout,
+            "residual_dropout": residual_dropout,
+            "d_out": d_out,
+            "cat_cardinalities": cat_cardinalities,
+            "attention_initialization": attention_initialization,
+            "attention_normalization": attention_normalization,
+            "ffn_activation": ffn_activation,
+            "ffn_normalization": ffn_normalization,
+            "prenormalization": prenormalization,
+            "head_activation": head_activation,
+            "head_normalization": head_normalization,
+            "num_tokenizer": num_tokenizer,
+            "num_tokenizer_type": num_tokenizer_type,
         })
-        model = cls(**config)
-        if num_tokenizer is None and num_tokenizer_type:
-            from num_embedding_factory import get_num_embedding
-            
-            model.feature_tokenizer.num_tokenizer = get_num_embedding(
-                embedding_type=num_tokenizer_type,
-                n_features=n_num_features,  # Passer n_num_features
-                d_embedding=d_token,
-            )
-            
-        return model
+        return cls(**config)
 
-    def forward(self, x_num: Tensor) -> Tensor:
-        x = self.feature_tokenizer(x_num, None)
+    def forward(self, x_num: Optional[Tensor], x_cat: Optional[Tensor] = None) -> Tensor:
+        """Forward compatible with both numerical and categorical inputs.
+
+        Accepts:
+            x_num: numerical features tensor or None if absent
+            x_cat: categorical features tensor or None if absent
+
+        The FeatureTokenizer will internally use any tokenizer present
+        (num_tokenizer and/or cat_tokenizer).
+        """
+        assert (x_cat is None) == (self.cat_cardinalities is None), \
+            "x_cat must be None if cat_cardinalities is None, and vice versa"
+        x = self.feature_tokenizer(x_num, x_cat)
         x = self.cls_token(x)
         for block in self.blocks:
             x = block(x)
         return self.head(x)
 
-    def get_cls_importance(self, x_num: Tensor, feature_names: Optional[List[str]] = None, batch_size: int = 64) -> Dict[str, Any]:
+    def get_cls_importance(
+        self,
+        x_num: Optional[Tensor],
+        x_cat: Optional[Tensor] = None,
+        feature_names: Optional[List[str]] = None,
+        batch_size: int = 64,
+    ) -> Dict[str, Any]:
         """Extrait et sauvegarde l'importance des features à partir des cartes d'attention.
 
-        Détails et conventions :
-        - Cette méthode attache un hook forward à chaque module d'attention pour collecter la
-          sortie meta renvoyée par InterpretableMultiHeadAttention, attendu sous la forme
-          (output_tensor, {"attention_probs": avg_attention}) où avg_attention a la forme
-          (batch_size, seq_len, seq_len) et correspond à la moyenne des probabilités d'attention
-          sur les têtes (grâce à sparsemax et au partage de V).
-        - Convention d'indexation dans cette implémentation : le token [CLS] est ajouté par
-          CLSToken à la FIN de la séquence. Par conséquent, la ligne correspondant au token CLS
-          est prise ici comme le dernier index (-1).
-        - Extraction : on lit la ligne CLS et on exclut la colonne correspondant au token CLS lui-même
-          pour obtenir les importances des J features -> average_attention_map[CLS_index, :-1].
-        - Remarque d'interprétabilité : les scores proviennent directement de sparsemax et sont
-          normalisés par ligne (somme = 1).
+        Arguments:
+            x_num: Tensor des features numériques (peut être None si pas de numériques)
+            x_cat: Tensor des features catégorielles (peut être None si pas de catégorielles)
+            feature_names: liste optionnelle de noms de features
+            batch_size: taille de batch pour l'extraction
 
-        Retour :
-        Dictionnaire contenant :
-         - key: nom de la feature (ou feature_i) -> importance (float)
-         - _sorted_indices : indices triés par importance décroissante
-         - _ranks_array : rangs (1 = plus important)
-         - _saved_paths : chemins absolus des fichiers sauvegardés (.npy et .csv)
+        Note:
+            Le token CLS est ajouté à la FIN de la séquence (convention CLSToken).
         """
+        assert (x_cat is None) == (self.cat_cardinalities is None), \
+            "x_cat must be None if cat_cardinalities is None, and vice versa"
         hook = AttentionHook()
         handles = [block.attention.register_forward_hook(hook) for block in self.blocks]
         try:
             self.eval()
             with torch.inference_mode():
-                for i in range(0, x_num.size(0), batch_size):
-                    batch_x_num = x_num[i : i + batch_size]
-                    _ = self(batch_x_num)
+                n_samples = x_num.size(0) if x_num is not None else x_cat.size(0)
+                for i in range(0, n_samples, batch_size):
+                    batch_x_num = None if x_num is None else x_num[i : i + batch_size]
+                    batch_x_cat = None if x_cat is None else x_cat[i : i + batch_size]
+                    _ = self(batch_x_num, batch_x_cat)
 
                 if not hook.attention_maps:
                     print("Aucune carte d'attention collectée.")
@@ -247,7 +275,6 @@ class InterpretableFTTPlus(nn.Module):
                 average_attention_map = attention_maps.mean(dim=0)
 
                 # Ici, le CLS est le dernier token (convention CLSToken ajoutant à la fin).
-                # Si votre CLSToken préfixe au début, remplacer -1 par 0.
                 cls_index = -1
                 feature_importance = average_attention_map[cls_index, :-1].cpu().numpy()
 
