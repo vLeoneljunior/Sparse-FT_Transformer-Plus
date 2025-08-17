@@ -54,17 +54,22 @@ Chaque bloc applique successivement une attention sparse interprétable, un FFN,
 - **Valeur partagée (V)** : Une seule matrice de valeur (V) est partagée entre toutes les têtes, éliminant les distortions dues à des transformations V différentes et rendant les scores d'attention directement comparables.
 - **Moyenne des scores d'attention** : Calculée sur les têtes pour refléter l'importance réelle de chaque feature.
 
+---
+
 <div align="center">
   <img src="images/Scaled Dot-Product Attention.png" alt="Scaled Dot-Product Attention avec sparsemax pour Sparse FTT+" width="300"/>
   <br>
   <b>Scaled Dot-Product Attention avec sparsemax pour Sparse FTT+</b>
 </div>
 
+---
 <div align="center">
   <img src="images/Interpretable Multi-Head Attention.png" alt="Illustration de l'Interpretable Multi-Head Self-Attention avec V partagé" width="500"/>
   <br>
   <b>Interpretable Multi-Head Self-Attention : V partagé et sparsemax pour une interprétabilité directe</b>
 </div>
+
+---
 
 ##### Feed-Forward Network (FFN)
 
@@ -75,11 +80,14 @@ Chaque bloc applique successivement une attention sparse interprétable, un FFN,
 - **LayerNorm** : Appliquée avant ou après les blocs pour stabiliser les gradients.
 - **Connexions résiduelles** : Pour faciliter l'entraînement en permettant un flux direct des gradients.
 
+---
 <div align="center">
   <img src="images/One Transformer layer.png" alt="Vue d'ensemble d'un bloc Transformer adapté aux données tabulaires (Sparse FTT+)" width="300"/>
   <br>
   <b>Vue d'ensemble d'un bloc Transformer adapté aux données tabulaires (Sparse FTT+)</b>
 </div>
+
+---
 
 #### 2.2.4 Head de classification
 
