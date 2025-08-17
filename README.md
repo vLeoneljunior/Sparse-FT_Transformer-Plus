@@ -18,6 +18,8 @@ Sparse FTT+ est une version interprétable du FT-Transformer qui intègre une at
   <img src="images/FT_Transformer architecture.png" alt="Architecture globale du Sparse FTT+ appliqué aux données tabulaires" width="500"/>
   <br>
   <b>Architecture globale du Sparse FTT+ appliqué aux données tabulaires</b>
+  <br>
+  Source: Gorishniy, Y., Rubachev, I., Khrulkov, V., & Babenko, A. (2023). <i>Revisiting Deep Learning Models for Tabular Data</i>. arXiv:2106.11959.
 </div>
 
 ### 2.2 Étapes détaillées
@@ -34,6 +36,8 @@ La tokenisation transforme les données brutes en une séquence de vecteurs unif
   <img src="images/Illustration%20d'un%20Feature%20Tokenizer.png" alt="Illustration du processus de tokenisation des variables brutes en vecteurs denses" width="500"/>
   <br>
   <b>Illustration du processus de tokenisation des variables brutes en vecteurs denses</b>
+  <br>
+  Source: Gorishniy, Y., Rubachev, I., Khrulkov, V., & Babenko, A. (2023). <i>Revisiting Deep Learning Models for Tabular Data</i>. arXiv:2106.11959.
 </div>
 
 #### 2.2.2 Ajout du token CLS
@@ -44,7 +48,7 @@ Un token spécial `[CLS]`, appris, est ajouté à la fin de la séquence pour ag
 
 Chaque bloc applique successivement une attention sparse interprétable, un FFN, et une normalisation résiduelle.
 
-##### Interpretable Multi-Head Attention
+##### Interpretable Multi-Head Self-Attention
 
 - **Attention sparse** : Utilise `sparsemax` (au lieu de `softmax`) pour produire des poids d'attention creuses, concentrés sur un sous-ensemble restreint de features, améliorant l'interprétabilité.
 - **Valeur partagée (V)** : Une seule matrice de valeur (V) est partagée entre toutes les têtes, éliminant les distortions dues à des transformations V différentes et rendant les scores d'attention directement comparables.
@@ -57,9 +61,9 @@ Chaque bloc applique successivement une attention sparse interprétable, un FFN,
 </div>
 
 <div align="center">
-  <img src="images/Interpretable Multi-Head Attention.png" alt="Illustration de l'Interpretable Multi-Head Attention avec V partagé" width="500"/>
+  <img src="images/Interpretable Multi-Head Attention.png" alt="Illustration de l'Interpretable Multi-Head Self-Attention avec V partagé" width="500"/>
   <br>
-  <b>Interpretable Multi-Head Attention : V partagé et sparsemax pour une interprétabilité directe</b>
+  <b>Interpretable Multi-Head Self-Attention : V partagé et sparsemax pour une interprétabilité directe</b>
 </div>
 
 ##### Feed-Forward Network (FFN)
@@ -110,7 +114,7 @@ sparse_ftt_plus/
 ## 5. Références
 
 - Vaswani, A., Shazeer, N., Parmar, N., et al. (2017). *Attention Is All You Need*. NeurIPS.
-- Gorishniy, Y., Rubachev, I., Khrulkov, V., & Babenko, A. (2021). *Revisiting Deep Learning Models for Tabular Data*.
+- Gorishniy, Y., Rubachev, I., Khrulkov, V., & Babenko, A. (2021). *Revisiting Deep Learning Models for Tabular Data*. arXiv:2106.11959.
 - Gorishniy, Y., Rubachev, I., & Babenko, A. (2021). *On Embeddings for Numerical Features in Tabular Deep Learning*.
 - Martins, A. F. T., & Astudillo, R. F. (2016). *From Softmax to Sparsemax: A Sparse Model of Attention and Multi-Label Classification*.
 - Lim, B., Arik, S. Ö., Loeff, N., & Pfister, T. (2021). *Temporal Fusion Transformers for Interpretable Multi-horizon Time Series Forecasting*.
@@ -121,5 +125,5 @@ sparse_ftt_plus/
 ## Auteur
 
 **Léonel VODOUNOU**  
-Sparse FTT+ – (Feature Tokenizer-Transformer interprétable pour données tabulaires)  
+Sparse FTT+ – Interprétabilité avancée pour données tabulaires  
 2025
