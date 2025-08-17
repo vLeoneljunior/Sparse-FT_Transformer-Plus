@@ -64,7 +64,7 @@ Chaque bloc applique successivement une attention sparse interprétable, un FFN,
 
 ---
 <div align="center">
-  <img src="images/Interpretable Multi-Head Attention.png" alt="Illustration de l'Interpretable Multi-Head Self-Attention avec V partagé" width="500"/>
+  <img src="images/Interpretable Multi-Head Self-Attention.png" alt="Illustration de l'Interpretable Multi-Head Self-Attention avec V partagé" width="500"/>
   <br>
   <b>Interpretable Multi-Head Self-Attention : V partagé et sparsemax pour une interprétabilité directe</b>
 </div>
