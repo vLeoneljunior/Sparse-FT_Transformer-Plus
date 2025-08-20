@@ -1,11 +1,11 @@
-program = 'bin/tabnet.py'
+program = 'rtdl_revisiting_models/bin/tabnet.py'
 
 [base_config]
 seed = 0
 
     [base_config.data]
     normalization = 'quantile'
-    path = 'data/adult'
+    path = 'rtdl_revisiting_models/data/adult'
     cat_policy = 'indices'
 
     [base_config.model]

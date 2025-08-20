@@ -10,7 +10,13 @@ import lib
 args, output = lib.load_config()
 args['model']['random_state'] = args['seed']
 
-zero.set_randomness(args['seed'])
+try:
+    zero.random.seed(args['seed'])
+except AttributeError:
+    try:
+        zero.set_randomness(args['seed'])
+    except AttributeError:
+        pass
 dataset_dir = lib.get_path(args['data']['path'])
 stats = lib.load_json(output / 'stats.json')
 stats.update({'dataset': dataset_dir.name, 'algorithm': Path(__file__).stem})
@@ -28,7 +34,13 @@ X = D.build_X(
     seed=args['seed'],
 )
 assert isinstance(X, dict)
-zero.set_randomness(args['seed'])
+try:
+    zero.random.seed(args['seed'])
+except AttributeError:
+    try:
+        zero.set_randomness(args['seed'])
+    except AttributeError:
+        pass
 Y, y_info = D.build_y(args['data'].get('y_policy'))
 lib.dump_pickle(y_info, output / 'y_info.pickle')
 

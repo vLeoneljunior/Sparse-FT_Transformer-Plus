@@ -413,7 +413,13 @@ def evaluate(args, sess, y, y_pred_op, parts, task_type, y_info):
 
 # %%
 args, output = lib.load_config()
-zero.set_randomness(args['seed'])
+try:
+    zero.random.seed(args['seed'])
+except AttributeError:
+    try:
+        zero.set_randomness(args['seed'])
+    except AttributeError:
+        pass
 dataset_dir = lib.get_path(args['data']['path'])
 stats = {
     "dataset": args["data"]["path"],
@@ -436,7 +442,13 @@ X = D.build_X(
 if not isinstance(X, tuple):
     X = (X, None)
 
-zero.set_randomness(args['seed'])
+try:
+    zero.random.seed(args['seed'])
+except AttributeError:
+    try:
+        zero.set_randomness(args['seed'])
+    except AttributeError:
+        pass
 Y, y_info = D.build_y(args['data'].get('y_policy'))
 lib.dump_pickle(y_info, output / 'y_info.pickle')
 X_num, X_cat = X

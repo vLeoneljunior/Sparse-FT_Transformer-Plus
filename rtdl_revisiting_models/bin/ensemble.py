@@ -24,11 +24,11 @@ SRC = env.PROJECT_DIR / args.experiment
 DST = SRC.with_name(SRC.name + '_ensemble')
 algorithm_is_gbdt = args.algorithm in ('catboost', 'xgboost', 'lightgbm_')
 
-for seeds in [range(0, 3)]:
+for seeds in [range(0, 5), range(5, 10), range(10, 15)]:
     if any(not (SRC / str(seed) / 'DONE').exists() for seed in seeds):
         continue
 
-    output = DST / f'0_2'
+    output = DST / f'{min(seeds)}_{max(seeds)}'
     if output.exists():
         continue
 

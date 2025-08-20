@@ -5,8 +5,8 @@ seed = 0
 
     [base_config.data]
     normalization = 'quantile'
-    path = 'rtdl_revisiting_models/data/adult'
-    cat_policy = 'indices'
+    path = 'rtdl_revisiting_models/data/california_housing'
+    y_policy = 'mean_std'
 
     [base_config.model]
     [base_config.training]
@@ -17,14 +17,13 @@ seed = 0
     patience = 16
 
 [optimization.options]
-n_trials = 100
+n_trials = 5
 
 [optimization.sampler]
 seed = 0
 
 [optimization.space.model]
 d_layers = [ '$mlp_d_layers', 1, 8, 1, 512 ]
-d_embedding = ['int', 64, 512]
 dropout = [ '?uniform', 0.0, 0.0, 0.5 ]
 
 [optimization.space.training]

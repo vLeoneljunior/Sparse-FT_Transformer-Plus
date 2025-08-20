@@ -1,10 +1,10 @@
-program = 'bin/xgboost_.py'
+program = 'rtdl_revisiting_models/bin/xgboost_.py'
 
 [base_config]
 seed = 0
 
     [base_config.data]
-    path = 'data/adult'
+    path = 'rtdl_revisiting_models/data/adult'
     cat_policy = 'ohe'
 
     [base_config.fit]

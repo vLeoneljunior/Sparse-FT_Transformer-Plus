@@ -15,7 +15,13 @@ args['model']['random_seed'] = args['seed']
 if args['model'].get('device_type') == 'gpu':
     assert os.environ.get('CUDA_VISIBLE_DEVICES')
 
-zero.set_randomness(args['seed'])
+try:
+    zero.random.seed(args['seed'])
+except AttributeError:
+    try:
+        zero.set_randomness(args['seed'])
+    except AttributeError:
+        pass
 dataset_dir = lib.get_path(args['data']['path'])
 stats = lib.load_json(output / 'stats.json')
 stats.update({'dataset': dataset_dir.name, 'algorithm': Path(__file__).stem})
@@ -29,7 +35,13 @@ X = D.build_X(
     cat_min_frequency=args['data'].get('cat_min_frequency', 0.0),
     seed=args['seed'],
 )
-zero.set_randomness(args['seed'])
+try:
+    zero.random.seed(args['seed'])
+except AttributeError:
+    try:
+        zero.set_randomness(args['seed'])
+    except AttributeError:
+        pass
 Y, y_info = D.build_y(args['data'].get('y_policy'))
 lib.dump_pickle(y_info, output / 'y_info.pickle')
 

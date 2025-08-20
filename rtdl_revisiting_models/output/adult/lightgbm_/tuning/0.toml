@@ -1,10 +1,10 @@
-program = 'bin/lightgbm_.py'
+program = 'rtdl_revisiting_models/bin/lightgbm_.py'
 
 [base_config]
 seed = 0
 
     [base_config.data]
-    path = 'data/adult'
+    path = 'rtdl_revisiting_models/data/adult'
     y_policy = 'mean_std'
     cat_policy = 'indices'
 

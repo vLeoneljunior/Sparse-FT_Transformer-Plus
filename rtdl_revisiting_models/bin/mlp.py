@@ -69,7 +69,7 @@ class MLP(nn.Module):
 args, output = lib.load_config()
 
 # %%
-zero.set_randomness(args['seed'])
+zero.random.seed(args['seed'])
 dataset_dir = lib.get_path(args['data']['path'])
 stats: ty.Dict[str, ty.Any] = {
     'dataset': dataset_dir.name,
@@ -91,7 +91,7 @@ X = D.build_X(
 if not isinstance(X, tuple):
     X = (X, None)
 
-zero.set_randomness(args['seed'])
+zero.random.seed(args['seed'])
 Y, y_info = D.build_y(args['data'].get('y_policy'))
 lib.dump_pickle(y_info, output / 'y_info.pickle')
 X = tuple(None if x is None else lib.to_tensors(x) for x in X)
@@ -204,7 +204,7 @@ def save_checkpoint(final):
             'model': model.state_dict(),
             'optimizer': optimizer.state_dict(),
             'stream': stream.state_dict(),
-            'random_state': zero.get_random_state(),
+            'random_state': zero.random.get_state(),
             **{
                 x: globals()[x]
                 for x in [

@@ -1,4 +1,4 @@
-program = 'bin/ft_transformer.py'
+program = 'rtdl_revisiting_models/bin/ft_transformer.py'
 
 [base_config]
 seed = 0
@@ -6,7 +6,7 @@ seed = 0
     [base_config.data]
     cat_policy = 'indices'
     normalization = 'quantile'
-    path = 'data/adult'
+    path = 'rtdl_revisiting_models/data/adult'
 
     [base_config.model]
     activation = 'reglu'

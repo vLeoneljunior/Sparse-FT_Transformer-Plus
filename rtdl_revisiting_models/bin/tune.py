@@ -139,7 +139,7 @@ def save_checkpoint(*_, **__):
             'study': study,
             'stats': stats,
             'timer': timer,
-            'random_state': zero.get_random_state(),
+            'random_state': zero.random.get_state(),
         },
         checkpoint_path,
     )
@@ -162,7 +162,7 @@ if checkpoint_path.exists():
         checkpoint['stats'],
         checkpoint['timer'],
     )
-    zero.set_random_state(checkpoint['random_state'])
+    zero.random.set_state(checkpoint['random_state'])
     if 'n_trials' in args['optimization']['options']:
         args['optimization']['options']['n_trials'] -= len(study.trials)
     if 'timeout' in args['optimization']['options']:
@@ -195,3 +195,4 @@ stats['best_stats'] = trial_stats[best_trial_id]
 stats['time'] = lib.format_seconds(timer())
 lib.dump_stats(stats, output, True)
 lib.backup_output(output)
+
