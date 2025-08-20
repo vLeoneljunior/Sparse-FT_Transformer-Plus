@@ -1,0 +1,11 @@
+{
+    "name": "year___0",
+    "basename": "year",
+    "split": 0,
+    "task_type": "regression",
+    "n_num_features": 90,
+    "n_cat_features": 0,
+    "train_size": 370972,
+    "val_size": 92743,
+    "test_size": 51630
+}

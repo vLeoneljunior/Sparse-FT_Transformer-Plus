@@ -1,0 +1,11 @@
+{
+    "name": "microsoft___0",
+    "basename": "microsoft",
+    "split": 0,
+    "task_type": "regression",
+    "n_num_features": 136,
+    "n_cat_features": 0,
+    "train_size": 723412,
+    "val_size": 235259,
+    "test_size": 241521
+}

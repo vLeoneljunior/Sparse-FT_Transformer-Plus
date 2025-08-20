@@ -1,0 +1,12 @@
+{
+    "name": "covtype___0",
+    "basename": "covtype",
+    "split": 0,
+    "task_type": "multiclass",
+    "n_num_features": 54,
+    "n_cat_features": 0,
+    "train_size": 371847,
+    "val_size": 92962,
+    "test_size": 116203,
+    "n_classes": 7
+}

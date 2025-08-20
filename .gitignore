@@ -71,6 +71,4 @@ Desktop.ini
 .idea/
 
 # RTDL datasets (too large for git - 4GB)
-rtdl_revisiting_models/data/
 *.tar.gz
-*.npy
