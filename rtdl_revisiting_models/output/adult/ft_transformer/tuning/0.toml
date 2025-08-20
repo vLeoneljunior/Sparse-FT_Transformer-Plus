@@ -17,12 +17,12 @@ seed = 0
     [base_config.training]
     batch_size = 256
     eval_batch_size = 8192
-    n_epochs = 1000000000
+    n_epochs = 200
     optimizer = 'adamw'
     patience = 16
 
 [optimization.options]
-n_trials = 100
+n_trials = 20
 
 [optimization.sampler]
 seed = 0

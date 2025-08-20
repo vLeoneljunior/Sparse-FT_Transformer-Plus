@@ -15,12 +15,12 @@ seed = 0
     [base_config.training]
     batch_size = 2048
     display_steps = 100
-    epochs = 50000
+    epochs = 200
     grad_thresh = 2000.0
     patience = 16
 
 [optimization.options]
-n_trials = 100
+n_trials = 20
 
 [optimization.sampler]
 seed = 0

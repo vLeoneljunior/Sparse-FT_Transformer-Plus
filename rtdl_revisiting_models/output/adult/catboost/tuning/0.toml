@@ -12,14 +12,14 @@ seed = 0
 
     [base_config.model]
     early_stopping_rounds = 50
-    iterations = 2000
+    iterations = 1000
     metric_period = 10
     od_pval = 0.001
     task_type = 'GPU'
     thread_count = 1
 
 [optimization.options]
-n_trials = 100
+n_trials = 20
 
 [optimization.sampler]
 seed = 0
