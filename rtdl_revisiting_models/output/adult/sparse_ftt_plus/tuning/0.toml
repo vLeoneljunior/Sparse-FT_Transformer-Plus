@@ -1,0 +1,51 @@
+program = 'sparse_ftt_plus/train_sparse_ftt_plus.py'
+
+[base_config]
+seed = 0
+
+    [base_config.data]
+    cat_policy = 'indices'
+    normalization = 'quantile'
+    path = 'rtdl_revisiting_models/data/adult'
+
+    [base_config.model]
+    attention_dropout = 0.0
+    residual_dropout = 0.0
+    ffn_dropout = 0.0
+    attention_initialization = 'kaiming'
+    attention_normalization = 'LayerNorm'
+    ffn_activation = 'ReGLU'
+    ffn_normalization = 'LayerNorm'
+    prenormalization = true
+    head_activation = 'ReLU'
+    head_normalization = 'LayerNorm'
+    n_heads = 8
+    num_tokenizer = false
+    d_ffn_factor = 1.333
+
+    [base_config.training]
+    batch_size = 256
+    eval_batch_size = 8192
+    n_epochs = 200
+    optimizer = 'adamw'
+    patience = 16
+    lr = 0.0001
+    weight_decay = 0.0001
+
+[optimization.options]
+n_trials = 20
+
+[optimization.sampler]
+seed = 0
+
+[optimization.space.model]
+d_token = [ '$d_token', 64, 512 ]
+n_blocks = [ 'int', 1, 4 ]
+attention_dropout = [ 'uniform', 0.0, 0.5 ]
+ffn_dropout = [ 'uniform', 0.0, 0.5 ]
+residual_dropout = [ '?uniform', 0.0, 0.0, 0.2 ]
+d_ffn_factor = [ 'uniform', 1.0, 4.0 ]
+
+[optimization.space.training]
+lr = [ 'loguniform', 1e-5, 1e-3 ]
+weight_decay = [ 'loguniform', 1e-6, 1e-3 ]
