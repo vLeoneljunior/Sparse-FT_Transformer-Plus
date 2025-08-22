@@ -6,7 +6,7 @@ import numpy as np
 import tensorflow as tf
 import zero
 
-import lib
+from rtdl_revisiting_models import lib
 
 
 # %%

@@ -56,5 +56,56 @@
         },
         "program": "rtdl_revisiting_models/bin/mlp.py"
     },
-    "environment": {}
+    "environment": {},
+    "best_stats": {
+        "dataset": "california_housing",
+        "algorithm": "mlp",
+        "config": {
+            "data": {
+                "normalization": "quantile",
+                "path": "rtdl_revisiting_models/data/california_housing",
+                "y_policy": "mean_std"
+            },
+            "model": {
+                "d_layers": [
+                    397,
+                    234,
+                    292
+                ],
+                "dropout": 0.3060478613612107
+            },
+            "seed": 0,
+            "training": {
+                "batch_size": 256,
+                "eval_batch_size": 8192,
+                "lr": 0.0007092543214735829,
+                "n_epochs": 1000000000,
+                "optimizer": "adamw",
+                "patience": 16,
+                "weight_decay": 0.0
+            }
+        },
+        "environment": {},
+        "epoch_size": 52,
+        "n_parameters": 165618,
+        "best_epoch": 129,
+        "metrics": {
+            "train": {
+                "rmse": 0.3916482252954187,
+                "score": -0.3916482252954187
+            },
+            "val": {
+                "rmse": 0.5080454230903286,
+                "score": -0.5080454230903286
+            },
+            "test": {
+                "rmse": 0.5026983763341771,
+                "score": -0.5026983763341771
+            }
+        },
+        "time": "0:01:43",
+        "trial_id": 3,
+        "tuning_time": "0:08:22"
+    },
+    "time": "0:14:36"
 }

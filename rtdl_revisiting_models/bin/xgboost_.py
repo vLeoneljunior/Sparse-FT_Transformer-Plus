@@ -5,7 +5,7 @@ import numpy as np
 import zero
 from xgboost import XGBClassifier, XGBRegressor
 
-import lib
+from rtdl_revisiting_models import lib
 
 args, output = lib.load_config()
 args['model']['random_state'] = args['seed']

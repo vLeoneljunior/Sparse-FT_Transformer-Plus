@@ -8,7 +8,7 @@ import pandas as pd
 import zero
 from lightgbm import LGBMClassifier, LGBMRegressor
 
-import lib
+from rtdl_revisiting_models import lib
 
 args, output = lib.load_config()
 args['model']['random_seed'] = args['seed']

@@ -9,7 +9,7 @@ import torch.nn.functional as F
 import zero
 from torch import Tensor
 
-import lib
+from rtdl_revisiting_models import lib
 from sparse_ftt_plus import InterpretableFTTPlus
 
 # %%

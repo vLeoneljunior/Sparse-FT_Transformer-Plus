@@ -5,7 +5,7 @@ from copy import deepcopy
 import numpy as np
 from scipy.special import expit, softmax
 
-import lib
+from rtdl_revisiting_models import lib
 import lib.env as env
 
 parser = argparse.ArgumentParser(

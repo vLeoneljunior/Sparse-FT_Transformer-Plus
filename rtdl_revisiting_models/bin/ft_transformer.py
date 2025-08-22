@@ -11,7 +11,7 @@ import torch.nn.init as nn_init
 import zero
 from torch import Tensor
 
-import lib
+from rtdl_revisiting_models import lib
 
 
 # %%

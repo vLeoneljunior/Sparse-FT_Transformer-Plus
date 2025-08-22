@@ -7,6 +7,7 @@ import uuid
 import warnings
 from copy import deepcopy
 from pathlib import Path
+import os
 
 import optuna
 import optuna.samplers
@@ -14,7 +15,7 @@ import optuna.trial
 import torch
 import zero
 
-import lib
+from rtdl_revisiting_models import lib
 
 # %%
 args, output = lib.load_config()
@@ -108,6 +109,10 @@ def objective(trial: optuna.trial.Trial) -> float:
         config_path = out.with_suffix('.toml')
         lib.dump_toml(config, config_path)
         python = Path('/miniconda3/envs/main/bin/python')
+        # ensure subprocess can import the package when running the copied script
+        env = os.environ.copy()
+        # add workspace root (the directory that contains the package folder) to PYTHONPATH
+        env['PYTHONPATH'] = str(program_copy.parent.parent.parent)
         subprocess.run(
             [
                 str(python) if python.exists() else "python",
@@ -115,6 +120,7 @@ def objective(trial: optuna.trial.Trial) -> float:
                 str(config_path),
             ],
             check=True,
+            env=env,
         )
         stats = lib.load_json(out / 'stats.json')
         stats['algorithm'] = stats['algorithm'].rsplit('___', 1)[0]
