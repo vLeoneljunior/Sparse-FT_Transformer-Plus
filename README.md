@@ -101,17 +101,7 @@ La prédiction finale est obtenue à partir du token `[CLS]` via une couche lin�
 
 ---
 
-## 3. Structure du Code
-
-```
-sparse_ftt_plus/
-    attention.py         # Implémentation de l'attention sparse interprétable (sparsemax, V partagé)
-    model.py             # Architecture Sparse FTT+ (FeatureTokenizer, CLS, blocs Transformer, head)
-```
-
----
-
-## 4. Objectifs de cette Étude
+## 3. Objectifs de cette Étude
 
 - Comprendre et expliquer les décisions des modèles tabulaires : enjeu crucial en entreprise (banque, assurance, santé).
 - Allier performance et transparence : lever le « black box effect » des réseaux profonds via une attention sparse.
@@ -119,7 +109,7 @@ sparse_ftt_plus/
 
 ---
 
-## 5. Références
+## 4. Références
 
 - Vaswani, A., Shazeer, N., Parmar, N., et al. (2017). *Attention Is All You Need*. NeurIPS.
 - Gorishniy, Y., Rubachev, I., Khrulkov, V., & Babenko, A. (2021). *Revisiting Deep Learning Models for Tabular Data*. arXiv:2106.11959.
