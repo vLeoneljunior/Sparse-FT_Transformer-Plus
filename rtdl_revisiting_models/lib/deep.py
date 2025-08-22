@@ -308,10 +308,10 @@ def learn_with_auto_virtual_batch(
     chunk_size: ty.Optional[int],
 ) -> ty.Tuple[Tensor, ty.Optional[int]]:
     """This is just an overcomplicated version of `train_with_auto_virtual_batch`."""
-    random_state = zero.get_random_state()
+    random_state = zero.random.get_state()
     while chunk_size != 0:
         try:
-            zero.set_random_state(random_state)
+            zero.random.set_state(random_state)
             return (
                 _learn_with_virtual_batch(
                     model,
@@ -340,10 +340,10 @@ def train_with_auto_virtual_batch(
     chunk_size: int,
 ) -> ty.Tuple[Tensor, int]:
     batch_size = len(batch)
-    random_state = zero.get_random_state()
+    random_state = zero.random.get_state()
     while chunk_size != 0:
         try:
-            zero.set_random_state(random_state)
+            zero.random.set_state(random_state)
             optimizer.zero_grad()
             if batch_size <= chunk_size:
                 loss = loss_fn(*step(batch))
