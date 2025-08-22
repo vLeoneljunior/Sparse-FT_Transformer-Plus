@@ -1,3 +1,4 @@
+# %%
 import math
 import typing as ty
 from pathlib import Path
@@ -6,30 +7,343 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.nn.init as nn_init
 import zero
 from torch import Tensor
 
 from rtdl_revisiting_models import lib
-from sparse_ftt_plus import InterpretableFTTPlus
+
+
+# %%
+class Tokenizer(nn.Module):
+    category_offsets: ty.Optional[Tensor]
+
+    def __init__(
+        self,
+        d_numerical: int,
+        categories: ty.Optional[ty.List[int]],
+        d_token: int,
+        bias: bool,
+    ) -> None:
+        super().__init__()
+        if categories is None:
+            d_bias = d_numerical
+            self.category_offsets = None
+            self.category_embeddings = None
+        else:
+            d_bias = d_numerical + len(categories)
+            category_offsets = torch.tensor([0] + categories[:-1]).cumsum(0)
+            self.register_buffer('category_offsets', category_offsets)
+            self.category_embeddings = nn.Embedding(sum(categories), d_token)
+            nn_init.kaiming_uniform_(self.category_embeddings.weight, a=math.sqrt(5))
+            print(f'{self.category_embeddings.weight.shape=}')
+
+        # take [CLS] token into account
+        self.weight = nn.Parameter(Tensor(d_numerical + 1, d_token))
+        self.bias = nn.Parameter(Tensor(d_bias, d_token)) if bias else None
+        # The initialization is inspired by nn.Linear
+        nn_init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.bias is not None:
+            nn_init.kaiming_uniform_(self.bias, a=math.sqrt(5))
+
+    @property
+    def n_tokens(self) -> int:
+        return len(self.weight) + (
+            0 if self.category_offsets is None else len(self.category_offsets)
+        )
+
+    def forward(self, x_num: Tensor, x_cat: ty.Optional[Tensor]) -> Tensor:
+        x_some = x_num if x_cat is None else x_cat
+        assert x_some is not None
+        x_num = torch.cat(
+            [torch.ones(len(x_some), 1, device=x_some.device)]  # [CLS]
+            + ([] if x_num is None else [x_num]),
+            dim=1,
+        )
+        x = self.weight[None] * x_num[:, :, None]
+        if x_cat is not None:
+            x = torch.cat(
+                [x, self.category_embeddings(x_cat + self.category_offsets[None])],
+                dim=1,
+            )
+        if self.bias is not None:
+            bias = torch.cat(
+                [
+                    torch.zeros(1, self.bias.shape[1], device=x.device),
+                    self.bias,
+                ]
+            )
+            x = x + bias[None]
+        return x
+
+
+# Import de l'attention interprétable
+import torch
+import torch.nn as nn
+from torch import Tensor
+import math
+from sparsemax import Sparsemax
+from typing import Tuple, Dict
+
+sparsemax = Sparsemax(dim=-1)
+
+
+class InterpretableMultiHeadAttention(nn.Module):
+    """Attention multi-tête interprétable selon TFT (équations 13-16).
+    
+    Implémente l'attention interprétable du TFT avec :
+    - V partagé entre toutes les têtes
+    - Moyenne des cartes d'attention par tête
+    - Application de l'attention moyennée au V partagé
+    """
+
+    def __init__(self, d_model: int, n_heads: int, dropout: float = 0.0, initialization: str = "kaiming"):
+        super().__init__()
+        assert d_model % n_heads == 0, 'd_model must be a multiple of n_heads'
+        assert initialization in ['kaiming', 'xavier']
+        
+        self.n_heads = n_heads
+        self.d_model = d_model
+        self.d_head = d_model // n_heads
+        self.d_v = d_model  # d_V dans les équations TFT
+        
+        # Projections Q, K par tête (comme équation 12)
+        self.W_q = nn.Linear(d_model, d_model, bias=True)  # Toutes les têtes Q
+        self.W_k = nn.Linear(d_model, d_model, bias=True)  # Toutes les têtes K
+        
+        # V partagé entre toutes les têtes (équation 14-15)
+        self.W_v = nn.Linear(d_model, self.d_v, bias=True)  # V W_V partagé
+        
+        # Projection finale W_H (équation 13)
+        self.W_h = nn.Linear(self.d_v, d_model, bias=True) if n_heads > 1 else None
+        
+        self.dropout = nn.Dropout(dropout) if dropout > 0.0 else None
+        self.scale = 1.0 / math.sqrt(self.d_head)
+        
+        # Initialisation
+        for m in [self.W_q, self.W_k, self.W_v]:
+            if initialization == 'xavier':
+                nn.init.xavier_uniform_(m.weight, gain=1 / math.sqrt(2))
+            elif initialization == 'kaiming':
+                nn.init.kaiming_uniform_(m.weight, mode='fan_in', nonlinearity='linear')
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+                
+        if self.W_h is not None:
+            if initialization == 'xavier':
+                nn.init.xavier_uniform_(self.W_h.weight)
+            elif initialization == 'kaiming':
+                nn.init.kaiming_uniform_(self.W_h.weight, mode='fan_in', nonlinearity='linear')
+            nn.init.zeros_(self.W_h.bias)
+
+    def forward(
+        self,
+        x_q: Tensor,
+        x_kv: Tensor,
+        key_compression: ty.Optional[nn.Linear],
+        value_compression: ty.Optional[nn.Linear],
+    ) -> Tensor:
+        """Forward suivant exactement les équations 13-16 du TFT."""
+        batch_size, seq_len, d_model = x_q.shape
+        
+        # Projections Q, K, V
+        q = self.W_q(x_q)  # (B, T, d_model)
+        k = self.W_k(x_kv)  # (B, T, d_model)
+        v = self.W_v(x_kv)  # (B, T, d_V) - V W_V partagé !
+        
+        # Gestion de la compression (pour compatibilité avec Linformer)
+        if key_compression is not None:
+            assert value_compression is not None
+            k = key_compression(k.transpose(1, 2)).transpose(1, 2)
+            v = value_compression(v.transpose(1, 2)).transpose(1, 2)
+        
+        # Reshape Q, K pour les têtes
+        q = q.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)  # (B, H, T, d_head)
+        k = k.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)  # (B, H, T, d_head)
+        
+        # Calcul des cartes d'attention par tête A(Q W_Q^(h), K W_K^(h))
+        attention_logits = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # (B, H, T, T)
+        
+        # Sparsemax par tête au lieu de softmax
+        attention_probs_per_head = sparsemax(attention_logits)  # (B, H, T, T)
+        
+        if self.dropout is not None:
+            attention_probs_per_head = self.dropout(attention_probs_per_head)
+        
+        # Équation 15 : Moyenne des cartes d'attention sur les têtes
+        # Ã(Q,K) = (1/H) ∑_{h=1}^m A(Q W_Q^(h), K W_K^(h))
+        avg_attention = attention_probs_per_head.mean(dim=1)  # (B, T, T)
+        
+        # Équation 14-15 : Application de l'attention moyennée au V partagé
+        # H̃ = Ã(Q,K) V W_V
+        output = torch.matmul(avg_attention, v)  # (B, T, d_V)
+        
+        # Équation 13 : Projection finale H̃ W_H
+        if self.W_h is not None:
+            output = self.W_h(output)  # (B, T, d_model)
+        
+        return output
+
+
+class Transformer(nn.Module):
+    """Transformer avec attention interprétable (sparsemax + V partagé).
+
+    References:
+    - https://pytorch.org/docs/stable/generated/torch.nn.Transformer.html
+    - https://github.com/facebookresearch/pytext/tree/master/pytext/models/representations/transformer
+    - https://github.com/pytorch/fairseq/blob/1bba712622b8ae4efb3eb793a8a40da386fe11d0/examples/linformer/linformer_src/modules/multihead_linear_attention.py#L19
+    """
+
+    def __init__(
+        self,
+        *,
+        # tokenizer
+        d_numerical: int,
+        categories: ty.Optional[ty.List[int]],
+        token_bias: bool,
+        # transformer
+        n_layers: int,
+        d_token: int,
+        n_heads: int,
+        d_ffn_factor: float,
+        attention_dropout: float,
+        ffn_dropout: float,
+        residual_dropout: float,
+        activation: str,
+        prenormalization: bool,
+        initialization: str,
+        # linformer
+        kv_compression: ty.Optional[float],
+        kv_compression_sharing: ty.Optional[str],
+        #
+        d_out: int,
+    ) -> None:
+        assert (kv_compression is None) ^ (kv_compression_sharing is not None)
+
+        super().__init__()
+        self.tokenizer = Tokenizer(d_numerical, categories, d_token, token_bias)
+        n_tokens = self.tokenizer.n_tokens
+
+        def make_kv_compression():
+            assert kv_compression
+            compression = nn.Linear(
+                n_tokens, int(n_tokens * kv_compression), bias=False
+            )
+            if initialization == 'xavier':
+                nn_init.xavier_uniform_(compression.weight)
+            return compression
+
+        self.shared_kv_compression = (
+            make_kv_compression()
+            if kv_compression and kv_compression_sharing == 'layerwise'
+            else None
+        )
+
+        def make_normalization():
+            return nn.LayerNorm(d_token)
+
+        d_hidden = int(d_token * d_ffn_factor)
+        self.layers = nn.ModuleList([])
+        for layer_idx in range(n_layers):
+            layer = nn.ModuleDict(
+                {
+                    'attention': InterpretableMultiHeadAttention(
+                        d_model=d_token, n_heads=n_heads, dropout=attention_dropout, initialization=initialization
+                    ),
+                    'linear0': nn.Linear(
+                        d_token, d_hidden * (2 if activation.endswith('glu') else 1)
+                    ),
+                    'linear1': nn.Linear(d_hidden, d_token),
+                    'norm1': make_normalization(),
+                }
+            )
+            if not prenormalization or layer_idx:
+                layer['norm0'] = make_normalization()
+            if kv_compression and self.shared_kv_compression is None:
+                layer['key_compression'] = make_kv_compression()
+                if kv_compression_sharing == 'headwise':
+                    layer['value_compression'] = make_kv_compression()
+                else:
+                    assert kv_compression_sharing == 'key-value'
+            self.layers.append(layer)
+
+        self.activation = lib.get_activation_fn(activation)
+        self.last_activation = lib.get_nonglu_activation_fn(activation)
+        self.prenormalization = prenormalization
+        self.last_normalization = make_normalization() if prenormalization else None
+        self.ffn_dropout = ffn_dropout
+        self.residual_dropout = residual_dropout
+        self.head = nn.Linear(d_token, d_out)
+
+    def _get_kv_compressions(self, layer):
+        return (
+            (self.shared_kv_compression, self.shared_kv_compression)
+            if self.shared_kv_compression is not None
+            else (layer['key_compression'], layer['value_compression'])
+            if 'key_compression' in layer and 'value_compression' in layer
+            else (layer['key_compression'], layer['key_compression'])
+            if 'key_compression' in layer
+            else (None, None)
+        )
+
+    def _start_residual(self, x, layer, norm_idx):
+        x_residual = x
+        if self.prenormalization:
+            norm_key = f'norm{norm_idx}'
+            if norm_key in layer:
+                x_residual = layer[norm_key](x_residual)
+        return x_residual
+
+    def _end_residual(self, x, x_residual, layer, norm_idx):
+        if self.residual_dropout:
+            x_residual = F.dropout(x_residual, self.residual_dropout, self.training)
+        x = x + x_residual
+        if not self.prenormalization:
+            x = layer[f'norm{norm_idx}'](x)
+        return x
+
+    def forward(self, x_num: Tensor, x_cat: ty.Optional[Tensor]) -> Tensor:
+        x = self.tokenizer(x_num, x_cat)
+
+        for layer_idx, layer in enumerate(self.layers):
+            is_last_layer = layer_idx + 1 == len(self.layers)
+            layer = ty.cast(ty.Dict[str, nn.Module], layer)
+
+            x_residual = self._start_residual(x, layer, 0)
+            x_residual = layer['attention'](
+                # for the last attention, it is enough to process only [CLS]
+                (x_residual[:, :1] if is_last_layer else x_residual),
+                x_residual,
+                *self._get_kv_compressions(layer),
+            )
+            if is_last_layer:
+                x = x[:, : x_residual.shape[1]]
+            x = self._end_residual(x, x_residual, layer, 0)
+
+            x_residual = self._start_residual(x, layer, 1)
+            x_residual = layer['linear0'](x_residual)
+            x_residual = self.activation(x_residual)
+            if self.ffn_dropout:
+                x_residual = F.dropout(x_residual, self.ffn_dropout, self.training)
+            x_residual = layer['linear1'](x_residual)
+            x = self._end_residual(x, x_residual, layer, 1)
+
+        assert x.shape[1] == 1
+        x = x[:, 0]
+        if self.last_normalization is not None:
+            x = self.last_normalization(x)
+        x = self.last_activation(x)
+        x = self.head(x)
+        x = x.squeeze(-1)
+        return x
+
 
 # %%
 if __name__ == "__main__":
     args, output = lib.load_config()
-    # Defaults specific to sparse FTT+
-    args['model'].setdefault('attention_dropout', 0.0)
-    args['model'].setdefault('residual_dropout', 0.0)
-    args['model'].setdefault('ffn_dropout', 0.0)
-    args['model'].setdefault('attention_initialization', 'kaiming')
-    args['model'].setdefault('attention_normalization', 'LayerNorm')
-    args['model'].setdefault('ffn_activation', 'ReGLU')
-    args['model'].setdefault('ffn_normalization', 'LayerNorm')
-    args['model'].setdefault('prenormalization', True)
-    args['model'].setdefault('head_activation', 'ReLU')
-    args['model'].setdefault('head_normalization', 'LayerNorm')
-    args['model'].setdefault('n_heads', 8)
-    args['model'].setdefault('num_tokenizer', False)  # Par défaut : tokenizer numérique standard
-    args['model'].setdefault('num_tokenizer_type', 'LR')  # Par défaut pour tokenizer personnalisé
-    args['model'].setdefault('d_ffn_factor', 1.333)  # Facteur pour calculer ffn_d_hidden
+    args['model'].setdefault('token_bias', True)
+    args['model'].setdefault('kv_compression', None)
+    args['model'].setdefault('kv_compression_sharing', None)
 
     # %%
     try:
@@ -96,47 +410,32 @@ if __name__ == "__main__":
         if D.is_multiclass
         else F.mse_loss
     )
-
-    # Instantiate InterpretableFTTPlus
-    n_num = 0 if X_num is None else X_num['train'].shape[1]
-    d_out = D.info['n_classes'] if D.is_multiclass else 1
-    cat_cardinalities = lib.get_categories(X_cat) if X_cat is not None else None
-    # Calculer ffn_d_hidden si non spécifié
-    ffn_d_hidden = args['model'].get('ffn_d_hidden')
-    if ffn_d_hidden is None:
-        ffn_d_hidden = int(args['model']['d_token'] * args['model']['d_ffn_factor'])
-
-    model = InterpretableFTTPlus.make_baseline(
-        n_num_features=n_num,
-        cat_cardinalities=cat_cardinalities,
-        d_token=args['model'].get('d_token'),
-        n_blocks=args['model'].get('n_blocks'),
-        n_heads=args['model'].get('n_heads'),
-        attention_dropout=args['model'].get('attention_dropout'),
-        ffn_d_hidden=ffn_d_hidden,
-        ffn_dropout=args['model'].get('ffn_dropout'),
-        residual_dropout=args['model'].get('residual_dropout'),
-        d_out=d_out,
-        attention_initialization=args['model'].get('attention_initialization'),
-        attention_normalization=args['model'].get('attention_normalization'),
-        ffn_activation=args['model'].get('ffn_activation'),
-        ffn_normalization=args['model'].get('ffn_normalization'),
-        prenormalization=args['model'].get('prenormalization'),
-        head_activation=args['model'].get('head_activation'),
-        head_normalization=args['model'].get('head_normalization'),
-        num_tokenizer=args['model'].get('num_tokenizer'),
-        num_tokenizer_type=args['model'].get('num_tokenizer_type'),
+    model = Transformer(
+        d_numerical=0 if X_num is None else X_num['train'].shape[1],
+        categories=lib.get_categories(X_cat),
+        d_out=D.info['n_classes'] if D.is_multiclass else 1,
+        **args['model'],
     ).to(device)
-
     if torch.cuda.device_count() > 1:
         print('Using nn.DataParallel')
         model = nn.DataParallel(model)
     stats['n_parameters'] = lib.get_n_parameters(model)
 
-    # Utiliser optimization_param_groups de InterpretableFTTPlus
+    def needs_wd(name):
+        return all(x not in name for x in ['tokenizer', '.norm', '.bias'])
+
+    for x in ['tokenizer', '.norm', '.bias']:
+        assert any(x in a for a in (b[0] for b in model.named_parameters()))
+    parameters_with_wd = [v for k, v in model.named_parameters() if needs_wd(k)]
+    parameters_without_wd = [v for k, v in model.named_parameters() if not needs_wd(k)]
     optimizer = lib.make_optimizer(
         args['training']['optimizer'],
-        model.optimization_param_groups(),
+        (
+            [
+                {'params': parameters_with_wd},
+                {'params': parameters_without_wd, 'weight_decay': 0.0},
+            ]
+        ),
         args['training']['lr'],
         args['training']['weight_decay'],
     )
@@ -163,10 +462,10 @@ if __name__ == "__main__":
         )
 
     def apply_model(part, idx):
-        real_model = model.module if isinstance(model, nn.DataParallel) else model
-        x_num_batch = None if X_num is None else X_num[part][idx]
-        x_cat_batch = None if X_cat is None else X_cat[part][idx]
-        return real_model(x_num_batch, x_cat_batch)
+        return model(
+            None if X_num is None else X_num[part][idx],
+            None if X_cat is None else X_cat[part][idx],
+        )
 
     @torch.no_grad()
     def evaluate(parts):
@@ -198,7 +497,7 @@ if __name__ == "__main__":
                 else:
                     break
             if not eval_batch_size:
-                raise RuntimeError('Not enough memory even for eval_batch_size=1')
+                RuntimeError('Not enough memory even for eval_batch_size=1')
             metrics[part] = lib.calculate_metrics(
                 D.info['task_type'],
                 Y[part].numpy(),
