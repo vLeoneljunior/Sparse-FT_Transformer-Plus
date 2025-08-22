@@ -31,7 +31,7 @@ model_config = {
     "ffn_activation": "ReGLU",
     "ffn_normalization": "LayerNorm",
     "prenormalization": True,
-    "num_tokenizer": True,
+    "num_tokenizer": False,
     "num_tokenizer_type": "LR",
 }
 
