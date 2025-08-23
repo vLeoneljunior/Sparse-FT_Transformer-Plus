@@ -144,12 +144,13 @@ class InterpretableMultiHeadAttention(nn.Module):
         value_compression: ty.Optional[nn.Linear],
     ) -> Tensor:
         """Forward suivant exactement les équations 13-16 du TFT."""
-        batch_size, seq_len, d_model = x_q.shape
+        batch_size, seq_len_q, d_model = x_q.shape
+        seq_len_k = x_kv.shape[1]
         
         # Projections Q, K, V
-        q = self.W_q(x_q)  # (B, T, d_model)
-        k = self.W_k(x_kv)  # (B, T, d_model)
-        v = self.W_v(x_kv)  # (B, T, d_V) - V W_V partagé !
+        q = self.W_q(x_q)  # (B, Tq, d_model)
+        k = self.W_k(x_kv)  # (B, Tk, d_model)
+        v = self.W_v(x_kv)  # (B, Tk, d_V) - V W_V partagé !
         
         # Gestion de la compression (pour compatibilité avec Linformer)
         if key_compression is not None:
@@ -157,9 +158,9 @@ class InterpretableMultiHeadAttention(nn.Module):
             k = key_compression(k.transpose(1, 2)).transpose(1, 2)
             v = value_compression(v.transpose(1, 2)).transpose(1, 2)
         
-        # Reshape Q, K pour les têtes
-        q = q.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)  # (B, H, T, d_head)
-        k = k.view(batch_size, seq_len, self.n_heads, self.d_head).transpose(1, 2)  # (B, H, T, d_head)
+        # Reshape Q, K pour les têtes (utiliser les longueurs correctes pour Q et KV)
+        q = q.view(batch_size, seq_len_q, self.n_heads, self.d_head).transpose(1, 2)  # (B, H, Tq, d_head)
+        k = k.view(batch_size, seq_len_k, self.n_heads, self.d_head).transpose(1, 2)  # (B, H, Tk, d_head)
         
         # Calcul des cartes d'attention par tête A(Q W_Q^(h), K W_K^(h))
         attention_logits = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # (B, H, T, T)
