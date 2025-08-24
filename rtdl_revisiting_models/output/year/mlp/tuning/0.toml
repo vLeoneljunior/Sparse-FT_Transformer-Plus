@@ -1,23 +1,23 @@
-program = 'bin/mlp.py'
+program = 'rtdl_revisiting_models/bin/mlp.py'
 
 [base_config]
 seed = 0
 
     [base_config.data]
     normalization = 'quantile'
-    path = 'data/year'
+    path = 'rtdl_revisiting_models/data/year'
     y_policy = 'mean_std'
 
     [base_config.model]
     [base_config.training]
     batch_size = 1024
     eval_batch_size = 8192
-    n_epochs = 1000000000
+    n_epochs = 200
     optimizer = 'adamw'
     patience = 16
 
 [optimization.options]
-n_trials = 100
+n_trials = 20
 
 [optimization.sampler]
 seed = 0

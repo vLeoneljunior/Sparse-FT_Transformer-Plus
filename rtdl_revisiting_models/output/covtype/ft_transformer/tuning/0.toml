@@ -1,11 +1,11 @@
-program = 'bin/ft_transformer.py'
+program = 'rtdl_revisiting_models/bin/ft_transformer.py'
 
 [base_config]
 seed = 0
 
     [base_config.data]
     normalization = 'quantile'
-    path = 'data/covtype'
+    path = 'rtdl_revisiting_models/data/covtype'
 
     [base_config.model]
     activation = 'reglu'
@@ -18,12 +18,12 @@ seed = 0
     [base_config.training]
     batch_size = 1024
     eval_batch_size = 8192
-    n_epochs = 1000000000
+    n_epochs = 200
     optimizer = 'adamw'
     patience = 16
 
 [optimization.options]
-n_trials = 50
+n_trials = 20
 
 [optimization.sampler]
 seed = 0

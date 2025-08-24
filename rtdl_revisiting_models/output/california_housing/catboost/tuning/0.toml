@@ -1,10 +1,10 @@
-program = 'bin/catboost_.py'
+program = 'rtdl_revisiting_models/bin/catboost_.py'
 
 [base_config]
 seed = 0
 
     [base_config.data]
-    path = 'data/california_housing'
+    path = 'rtdl_revisiting_models/data/california_housing'
     y_policy = 'mean_std'
 
     [base_config.fit]
@@ -12,14 +12,14 @@ seed = 0
 
     [base_config.model]
     early_stopping_rounds = 50
-    iterations = 2000
+    iterations = 1000
     metric_period = 10
     od_pval = 0.001
     task_type = 'GPU'
     thread_count = 1
 
 [optimization.options]
-n_trials = 100
+n_trials = 20
 
 [optimization.sampler]
 seed = 0
