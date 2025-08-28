@@ -16,6 +16,8 @@ warnings.filterwarnings("ignore", message=".*sparse.*renamed.*sparse_output.*")
 warnings.filterwarnings("ignore", message=".*eval_metric.*deprecated.*")
 warnings.filterwarnings("ignore", message=".*early_stopping_rounds.*deprecated.*")
 warnings.filterwarnings("ignore", message=".*Falling back to prediction using DMatrix.*")
+warnings.filterwarnings("ignore", message=".*Precision and F-score are ill-defined.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="sklearn.metrics")
 
 args, output = lib.load_config()
 args['model']['random_state'] = args['seed']
