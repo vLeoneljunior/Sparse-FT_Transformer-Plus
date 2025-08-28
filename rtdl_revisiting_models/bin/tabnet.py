@@ -79,7 +79,10 @@ class TabNet:
             # Reads and normalizes input features.
             # NOTE we do data normalization at a dataset level
             if self.columns:
-                features = tf.feature_column.input_layer(data, self.columns)
+                # TensorFlow 2.x replacement for tf.feature_column.input_layer
+                if not hasattr(self, '_feature_layer'):
+                    self._feature_layer = tf.keras.utils.DenseFeatures(self.columns)
+                features = self._feature_layer(data)
             else:
                 features = data
 
