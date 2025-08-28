@@ -17,6 +17,10 @@ import zero
 
 from rtdl_revisiting_models import lib
 
+# Suppress optuna deprecation warnings
+warnings.filterwarnings("ignore", message=".*suggest_loguniform.*deprecated.*")
+warnings.filterwarnings("ignore", message=".*suggest_uniform.*deprecated.*")
+
 # %%
 args, output = lib.load_config()
 
@@ -28,7 +32,13 @@ def sample_parameters(
     base_config: ty.Dict[str, ty.Any],
 ) -> ty.Dict[str, ty.Any]:
     def get_distribution(distribution_name):
-        return getattr(trial, f'suggest_{distribution_name}')
+        # Map deprecated distributions to new API
+        if distribution_name == 'loguniform':
+            return lambda label, low, high: trial.suggest_float(label, low, high, log=True)
+        elif distribution_name == 'uniform':
+            return lambda label, low, high: trial.suggest_float(label, low, high)
+        else:
+            return getattr(trial, f'suggest_{distribution_name}')
 
     result = {}
     for label, subspace in space.items():
@@ -40,8 +50,9 @@ def sample_parameters(
 
             if distribution.startswith('?'):
                 default_value = args[0]
+                clean_distribution = distribution.lstrip('?')
                 result[label] = (
-                    get_distribution(distribution.lstrip('?'))(label, *args[1:])
+                    get_distribution(clean_distribution)(label, *args[1:])
                     if trial.suggest_categorical(f'optional_{label}', [False, True])
                     else default_value
                 )
@@ -71,7 +82,8 @@ def sample_parameters(
             elif distribution in ['$d_ffn_factor', '$d_hidden_factor']:
                 if base_config['model']['activation'].endswith('glu'):
                     args = (args[0] * 2 / 3, args[1] * 2 / 3)
-                result[label] = trial.suggest_uniform('d_ffn_factor', *args)
+                # Use new API instead of suggest_uniform
+                result[label] = trial.suggest_float('d_ffn_factor', *args)
 
             else:
                 result[label] = get_distribution(distribution)(label, *args)
@@ -201,4 +213,3 @@ stats['best_stats'] = trial_stats[best_trial_id]
 stats['time'] = lib.format_seconds(timer())
 lib.dump_stats(stats, output, True)
 lib.backup_output(output)
-
