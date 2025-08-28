@@ -4,6 +4,14 @@ from pathlib import Path
 
 import numpy as np
 import tensorflow as tf
+# If TensorFlow 2.x is installed, enable TF1 compatibility so legacy TF1 code below works.
+# We rebind `tf` to `tensorflow.compat.v1` and disable v2 behaviour when needed.
+try:
+    # In TF1 tf.reset_default_graph exists; in TF2 it doesn't.
+    _ = tf.reset_default_graph  # type: ignore[attr-defined]
+except Exception:
+    import tensorflow.compat.v1 as tf  # type: ignore
+    tf.disable_v2_behavior()
 import zero
 
 from rtdl_revisiting_models import lib
