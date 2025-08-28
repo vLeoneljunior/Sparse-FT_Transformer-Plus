@@ -5,27 +5,6 @@ from pathlib import Path
 import numpy as np
 import tensorflow as tf
 import zero
-# Compatibilité TF1 pour environnements TensorFlow 2 / Keras 3
-try:
-    if hasattr(tf, "compat") and hasattr(tf.compat, "v1"):
-        # Force le comportement v1 (Sessions, tf.layers, placeholders, etc.)
-        tf.compat.v1.disable_v2_behavior()
-        # Certains modules sont directement exposés pour le code existant qui utilise tf.*.
-        tf.layers = tf.compat.v1.layers
-        tf.reset_default_graph = tf.compat.v1.reset_default_graph
-        tf.set_random_seed = tf.compat.v1.set_random_seed
-        tf.initialize_all_variables = tf.compat.v1.initialize_all_variables
-        tf.local_variables_initializer = tf.compat.v1.local_variables_initializer
-        tf.tables_initializer = tf.compat.v1.tables_initializer
-        tf.train = tf.compat.v1.train
-        tf.get_collection = tf.compat.v1.get_collection
-        tf.GraphKeys = tf.compat.v1.GraphKeys
-        tf.Session = tf.compat.v1.Session
-        tf.losses = tf.compat.v1.losses
-except Exception:
-    # En cas d'échec, continue sans lever d'exception — l'erreur d'origine sera alors visible.
-    pass
-
 
 from rtdl_revisiting_models import lib
 
