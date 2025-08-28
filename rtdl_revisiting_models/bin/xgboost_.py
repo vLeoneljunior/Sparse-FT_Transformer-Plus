@@ -1,5 +1,6 @@
 from copy import deepcopy
 from pathlib import Path
+import os
 
 import numpy as np
 import zero
@@ -49,11 +50,20 @@ fit_kwargs = deepcopy(args["fit"])
 # XGBoost does not automatically use the best model, so early stopping must be used
 assert 'early_stopping_rounds' in fit_kwargs
 fit_kwargs['eval_set'] = [(X[lib.VAL], Y[lib.VAL])]
+
+# Normalize GPU options across xgboost versions and ensure device/data match.
+model_kwargs = deepcopy(args["model"])
+# If config requested gpu_hist, translate to current recommended API.
+if 'tree_method' in model_kwargs and 'gpu' in str(model_kwargs.get('tree_method')).lower():
+    model_kwargs['tree_method'] = 'hist'
+    # If CUDA_VISIBLE_DEVICES set, prefer GPU, otherwise fall back to CPU.
+    model_kwargs['device'] = 'cuda' if os.environ.get('CUDA_VISIBLE_DEVICES') else 'cpu'
+
 if D.is_regression:
-    model = XGBRegressor(**args["model"])
+    model = XGBRegressor(**model_kwargs)
     predict = model.predict
 else:
-    model = XGBClassifier(**args["model"], disable_default_eval_metric=True)
+    model = XGBClassifier(**model_kwargs, disable_default_eval_metric=True)
     if D.is_multiclass:
         predict = model.predict_proba
         fit_kwargs['eval_metric'] = 'merror'
